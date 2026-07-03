@@ -1,0 +1,42 @@
+# ---- PHI / raw data: NEVER commit ----
+# Therapy session recordings are identifiable PHI. Filenames themselves
+# contain participant IDs. Audio, converted audio, and every transcript or
+# diarization artifact derived from them stays out of git.
+*.m4a
+*.wav
+*.mp3
+*.flac
+*.mp4
+*.mov
+data/
+transcripts/
+diarization/
+*.rttm
+*.srt
+*.vtt
+
+# Transcript/feature outputs (may contain session content)
+*.json
+*.jsonl
+*.csv
+*.parquet
+
+# ---- Private working notes (gitignored TODO strategy) ----
+writeup/
+
+# ---- Environments / caches / artifacts ----
+venvs/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+slurm_jobs/**/logs/
+scratch/
+artifacts/
+figures/
+
+# ---- Editor / OS / secrets ----
+.claude/
+.vscode/
+.env
+.DS_Store
