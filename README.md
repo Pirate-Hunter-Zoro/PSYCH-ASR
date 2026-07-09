@@ -88,25 +88,30 @@ project on this box:
 
 - **Partition:** `c3_accel`, request GPUs via `#SBATCH --gres=gpu:N`.
 - **Modules:** `module load Anaconda3/2025.06-0`.
-- **Envs:** conda prefix envs under `/media/studies/ehr_study/analysis/mferguson/venvs/`
-  (created by `setup_envs.sh`, not committed here).
+- **Env:** one conda *prefix* env, `asr_env` (Python 3.11), under
+  `/media/studies/ehr_study/analysis/mferguson/venvs/`, built by
+  `scripts/setup_envs.sh` (not committed here).
 - **GPU pinning:** jobs select the freest GPU via `nvidia-smi --query-gpu=memory.free`
   and set `CUDA_VISIBLE_DEVICES` to dodge bare-metal squatters Slurm can't see.
 
-Core libraries: `whisper` / `whisperx`, `pyannote.audio`, `torch`, `ffmpeg` for
-Stage 0. pyannote models are gated on Hugging Face — accept the terms and download
-weights once with a token, after which everything runs offline.
+Core libraries (pinned in `scripts/setup_envs.sh`): **`whisperx` 3.8.6 anchors the
+whole stack** — its `~=` dependency pins force `torch`/`torchaudio` 2.8.x,
+`torchvision` 0.23.x, `ctranslate2` 4.8.1, `faster-whisper` 1.2.1, and
+`pyannote.audio` 4.0.7, alongside `transformers` 4.55.4, `soundfile`, and the
+system `ffmpeg` 5.1.9 used for Stage 0. The node's CUDA-13.3 driver runs the cu12
+`torch` wheels (backward-compatible); ctranslate2's cuDNN 9 rides in with torch, so
+no system cuDNN is required. pyannote models are gated on Hugging Face — accept the
+terms and download weights once with a token, after which everything runs offline.
 
 ---
 
 ## Repository layout
 
-```
+```bash
 .
 ├── README.md              # this file (committed)
 ├── .gitignore             # PHI, audio, transcripts, envs all excluded
-├── libraries.txt          # shortlist of core libraries
-├── scripts/               # pipeline code (Stage 0–4)
+├── scripts/               # pipeline code (Stage 0–4); setup_envs.sh builds the env
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
 ├── data/                  # raw + derived data — GITIGNORED (PHI)
 └── writeup/               # private notes incl. TODO.txt — GITIGNORED
