@@ -93,6 +93,11 @@ project on this box:
   `scripts/setup_envs.sh` (not committed here).
 - **GPU pinning:** jobs select the freest GPU via `nvidia-smi --query-gpu=memory.free`
   and set `CUDA_VISIBLE_DEVICES` to dodge bare-metal squatters Slurm can't see.
+- **Model weights (offline):** the login node has outbound internet; the compute
+  nodes do not. All model weights are downloaded once into a `models/` directory on
+  study storage and loaded from there by absolute path, with `HF_HUB_OFFLINE=1` set
+  in every job so a stray Hub request fails fast instead of hanging on a compute
+  node.
 
 Core libraries (pinned in `scripts/setup_envs.sh`): **`whisperx` 3.8.6 anchors the
 whole stack** — its `~=` dependency pins force `torch`/`torchaudio` 2.8.x,

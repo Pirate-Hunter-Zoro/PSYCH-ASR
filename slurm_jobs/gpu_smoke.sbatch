@@ -23,6 +23,7 @@ eval "$(conda shell.bash hook)"
 # Conda often dislikes 'set -u'—use this safe pattern:
 set +u; conda activate "${CONDA_ENV}"; set -u || exit 10
 export PYTHONNOUSERSITE=1
+export HF_HUB_OFFLINE=1
 
 # Pin to the GPU with the most free memory (works around bare-metal squatters slurm cannot see)
 FREE_GPU=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
