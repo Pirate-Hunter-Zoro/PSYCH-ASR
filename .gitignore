@@ -21,9 +21,6 @@ diarization/
 *.csv
 *.parquet
 
-# ---- Private working notes (gitignored TODO strategy) ----
-writeup/
-
 # ---- Environments / caches / artifacts ----
 venvs/
 __pycache__/

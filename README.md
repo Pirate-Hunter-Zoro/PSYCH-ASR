@@ -14,6 +14,14 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > or derived feature ever leaves the node or is sent to an external API. See
 > [Privacy & Data Handling](#privacy--data-handling).
 
+> **Companion documentation — read this first.** This README documents the *pipeline
+> architecture*. The plain-language research narrative and this project's live task list
+> live in the separate **`Research-Journey`** repo, in the home folder as a sibling of this
+> repo (`~/Research-Journey`). It is its own private git repo (on GitHub as
+> `Pirate-Hunter-Zoro/Research-Journey`) and is a **multi-project narrative hub** covering
+> both this project and the sibling `TRD-EHR` project. Start there for "where are we / what's
+> the story"; this project's live task list is `~/Research-Journey/planning/PSYCH-ASR_TODO.txt`.
+
 ---
 
 ## Goals
@@ -108,6 +116,47 @@ system `ffmpeg` 5.1.9 used for Stage 0. The node's CUDA-13.3 driver runs the cu1
 no system cuDNN is required. pyannote models are gated on Hugging Face — accept the
 terms and download weights once with a token, after which everything runs offline.
 
+### Staging model weights (offline)
+
+Because compute nodes have no internet, every model is downloaded **once on the login
+node** into a `models/` directory on study storage and thereafter loaded by absolute
+path with `HF_HUB_OFFLINE=1`. The Hugging Face CLI (`hf`) ships inside the `asr_env`
+conda environment.
+
+**Diarization model — `pyannote/speaker-diarization-community-1`.** WhisperX 3.8.6
+defaults its diarizer to this model, and pyannote.audio 4.0.7's `SpeakerDiarization`
+pipeline is built around it: segmentation, embedding, and PLDA all live as subfolders
+of that single repo, and clustering defaults to `VBxClustering`. Because it is
+self-contained, staging it needs no config edits and no `--diarize_model` override.
+
+> The older `pyannote/speaker-diarization-3.1` does **not** work offline on
+> pyannote.audio 4.0.7: the 4.x pipeline constructor loads a PLDA model
+> unconditionally, and the 3.1 config predates PLDA, so an offline load raises
+> `LocalEntryNotFoundError`. Use community-1.
+
+One-time setup:
+
+1. **Authenticate.** Create a read-scoped token at
+   `huggingface.co/settings/tokens` and place it in a git-ignored `.env` at the repo
+   root as `HF_TOKEN=...`. Never commit the token.
+2. **Accept the gate.** While logged in as the token's account, open the model page
+   and click *"Agree and access repository."* community-1 is auto-gated, so access is
+   granted instantly (no manual approval).
+3. **Download into `models/`.** With `asr_env` active, from the repo root:
+
+   ```bash
+   set -a; source .env; set +a        # export HF_TOKEN for this shell
+   hf download pyannote/speaker-diarization-community-1 \
+     --local-dir /media/studies/ehr_study/analysis/mferguson/models/pyannote-speaker-diarization-community-1
+   ```
+
+   Do **not** set `HF_HUB_OFFLINE` for the download — only for the later load.
+4. **Load offline.** In pipeline code, set `HF_HUB_OFFLINE=1` and call
+   `Pipeline.from_pretrained()` with the **absolute local directory**, never the Hub id.
+
+The same download recipe stages any other model (e.g. `faster-whisper` for ASR): one
+`hf download ... --local-dir models/<name>` on the login node, then load by path.
+
 ---
 
 ## Repository layout
@@ -118,9 +167,12 @@ terms and download weights once with a token, after which everything runs offlin
 ├── .gitignore             # PHI, audio, transcripts, envs all excluded
 ├── scripts/               # pipeline code (Stage 0–4); setup_envs.sh builds the env
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
-├── data/                  # raw + derived data — GITIGNORED (PHI)
-└── writeup/               # private notes incl. TODO.txt — GITIGNORED
+└── data/                  # raw + derived data — GITIGNORED (PHI)
 ```
+
+The plain-language narrative and this project's task list now live in the
+sibling `~/Research-Journey` repo (see the **Companion documentation** note at the
+top of this README); the former `writeup/` directory was relocated there.
 
 ---
 

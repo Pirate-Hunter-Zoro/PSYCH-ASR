@@ -11,3 +11,5 @@ fi
 
 input="$1"
 output="${input%.m4a}.wav" # Strip .m4a and replace with .wav for output file
+
+ffmpeg -y -i "$input" -ar 16000 -ac 1 -c:a pcm_s16le "$output"
