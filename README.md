@@ -13,7 +13,6 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > (ASR, diarization, downstream NLP) runs locally on LIBR compute. No audio, transcript,
 > or derived feature ever leaves the node or is sent to an external API. See
 > [Privacy & Data Handling](#privacy--data-handling).
-
 > **Companion documentation — read this first.** This README documents the *pipeline
 > architecture*. The plain-language research narrative and this project's live task list
 > live in the separate **`Research-Journey`** repo, in the home folder as a sibling of this
@@ -156,6 +155,20 @@ One-time setup:
 
 The same download recipe stages any other model (e.g. `faster-whisper` for ASR): one
 `hf download ... --local-dir models/<name>` on the login node, then load by path.
+
+> **Verify a staged model, don't assume it.** `hf download` can terminate leaving a
+> directory that contains only `README.md` and empty weight subfolders, with lock files
+> under `.cache/huggingface/download/` as the only trace. The directory looks staged from
+> a casual `ls`. Always confirm by file count *and* an actual offline load before treating
+> a model as available.
+
+**Forced alignment is not a Hugging Face download.** For English, WhisperX resolves its
+alignment model to a **torchaudio** bundle (`WAV2VEC2_ASR_BASE_960H`), fetched from
+`download.pytorch.org` into the Torch hub cache — not from the Hugging Face Hub. Setting
+`HF_HUB_OFFLINE=1` therefore does *not* protect this path, and on a node without outbound
+internet it will stall exactly the way an unstaged Hub model does. Warm this cache once
+where there is internet and set `TORCH_HOME` to a persistent directory on study storage in
+every job so the compute node reuses it instead of re-fetching.
 
 ---
 
