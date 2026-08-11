@@ -135,6 +135,16 @@ defaults its diarizer to this model, and pyannote.audio 4.0.7's `SpeakerDiarizat
 pipeline is built around it: segmentation, embedding, and PLDA all live as subfolders
 of that single repo, and clustering defaults to `VBxClustering`. Because it is
 self-contained, staging it needs no config edits and no `--diarize_model` override.
+`Pipeline.from_pretrained` accepts the local *directory* and finds `config.yaml` inside
+it — there is no need to name the yaml file — and the config's `$model/...` references
+resolve against that same directory.
+
+Its speaker embedder is **WeSpeaker ResNet34 trained on VoxCeleb**, which maps a chunk
+of speech to a fixed-width vector such that same-speaker chunks land near each other;
+clustering those vectors is what separates the speakers. The config sets
+`embedding_exclude_overlap: true`, so regions where both people talk at once are left
+out of embedding extraction and do not contaminate the speaker profiles — relevant here
+because therapist backchannels ("mm-hm") overlap patient speech constantly.
 
 > The older `pyannote/speaker-diarization-3.1` does **not** work offline on
 > pyannote.audio 4.0.7: the 4.x pipeline constructor loads a PLDA model
@@ -225,21 +235,65 @@ invocation are all relative and resolve against the submit directory.
   `TORCH_HOME`, `NLTK_DATA`.
 - `scripts/run_whisperx.py` — takes the audio path positionally, plus `--outdir`
   (default `data/stage1`), `--model-dir` (default the staged
-  `faster-whisper-large-v3`), and `--batch-size` (default 16). Decodes once with
-  `whisperx.load_audio`, loads the ASR model by **absolute local path** with
-  `local_files_only`, `float16`, and language forced to English (skipping per-chunk
-  detection), then transcribes.
+  `faster-whisper-large-v3`), `--batch-size` (default 16), `--diarize-model-dir`
+  (default the staged `pyannote-speaker-diarization-community-1`), and
+  `--num-speakers` (default 2).
 
-**Output:** `data/stage1/<stem>.asr.json` — a dict of `segments` and `language`, where
-each segment carries `start`, `end`, `text`, and `avg_logprob`. That `avg_logprob` is
-the per-segment confidence Stage 2's quality triage runs on. As a working scale, above
-−0.5 is a confident decode and below −1.0 is where Whisper starts hallucinating.
+The script decodes the audio **once** with `whisperx.load_audio` and reuses that array
+for all three passes, so ffmpeg runs a single time:
 
-**Status.** The ASR pass is built and verified end to end on a 90-second cut of the
-pilot session: 3 segments, coverage to within 0.03 s of the audio end, `avg_logprob`
-between −0.06 and −0.12. That was opening small talk — the easiest audio in the
-session — so it validates the *plumbing*, not the accuracy. Forced alignment and
-diarization are not yet wired into the script.
+1. **ASR.** Loads the Whisper model by **absolute local path** with `local_files_only`,
+   `float16`, and language forced to English (skipping per-chunk detection), then
+   transcribes. Produces segments with loose (±~0.5 s) boundaries.
+2. **Forced alignment.** `whisperx.load_align_model` for the detected language — which
+   for English resolves to the **torchaudio** `WAV2VEC2_ASR_BASE_960H` bundle out of
+   `TORCH_HOME`, not a Hub download — then `whisperx.align` re-times the existing text
+   against the waveform at phoneme resolution. Adds a `words` list per segment with
+   per-word `start`/`end`/`score`. Note this step *re-splits* segments at sentence
+   boundaries (via nltk `punkt_tab`), so the aligned segment count is normally **higher**
+   than the ASR segment count. `avg_logprob` is carried through the split.
+3. **Diarization.** `DiarizationPipeline` pointed at the local community-1 directory,
+   called with `num_speakers`, then `whisperx.assign_word_speakers` joins its turns onto
+   the transcript by timestamp overlap.
+
+**Why forced alignment must precede diarization.** Diarization emits speaker turns as
+timestamps, and the join is purely temporal. Whisper's native segment edges are loose
+enough that a boundary landing inside a speaker change would stamp words onto the wrong
+person. Word-level times make the join tight.
+
+**Why `--num-speakers` defaults to 2, rather than letting the pipeline infer it.** The
+clustering step decides the speaker count from the data, and it errs in *both*
+directions: it can split one person into two clusters when their voice shifts (a calm
+patient vs. a distressed one), and it can merge two similar voices into one. Every pilot
+session has exactly two people in it, so constraining the count removes both failure
+modes for free. The flag exists rather than a hardcoded 2 in case a session turns out to
+have a third person present.
+
+**Output:** `data/stage1/<stem>.diarized.json` — a dict of `segments`, `word_segments`,
+and `language`. Each segment carries `start`, `end`, `text`, `avg_logprob`, a `words`
+list, and a `speaker` label; each word carries `start`, `end`, `score`, and `speaker`.
+That `avg_logprob` is the per-segment confidence Stage 2's quality triage runs on. As a
+working scale, above −0.5 is a confident decode and below −1.0 is where Whisper starts
+hallucinating. Speaker labels are anonymous (`SPEAKER_00` / `SPEAKER_01`) — nothing in
+the audio identifies roles, so mapping them to therapist/patient is Stage 2's first job.
+
+> **`speaker` is not guaranteed on every segment or word.** `assign_word_speakers` sets
+> it only where the transcript span actually overlaps a diarized turn, and `fill_nearest`
+> is off by default, so there is no fallback. Anything reading these files must tolerate a
+> missing key rather than indexing it directly. A few unlabeled items is normal; many
+> means diarization under-covered the audio.
+
+> **`DiarizationPipeline` is not exported at package level.** WhisperX 3.8.6's
+> `__init__.py` lazily exposes only `load_model`, `load_audio`, `load_align_model`,
+> `align`, `assign_word_speakers`, and the logging helpers. `whisperx.DiarizationPipeline`
+> raises `AttributeError`; import the class from `whisperx.diarize`.
+
+**Status.** The ASR pass is verified end to end on a 90-second cut of the pilot session:
+3 segments, coverage to within 0.03 s of the audio end, `avg_logprob` between −0.06 and
+−0.12. That was opening small talk — the easiest audio in the session — so it validates
+the *plumbing*, not the accuracy. Alignment and diarization are written into the script
+but **not yet run**; the full-session run and the human check of diarization quality are
+still open.
 
 Two warnings in the job's stderr are benign and expected: Lightning auto-upgrading the
 checkpoint format of WhisperX's bundled VAD model, and pyannote disabling TF32 matmuls
@@ -258,14 +312,14 @@ for reproducibility (a small speed cost, nothing else).
 │   ├── standardize.sh         # Stage 0: one .m4a path in -> 16 kHz mono WAV in data/
 │   ├── stage_models.sh        # login-node staging of all offline model assets
 │   ├── warm_align_cache.py    # fetches the torchaudio alignment bundle into TORCH_HOME
-│   ├── run_whisperx.py        # Stage 1 entry point: ASR pass (align/diarize pending)
+│   ├── run_whisperx.py        # Stage 1 entry point: ASR -> align -> diarize
 │   └── gpu_smoke.py           # GPU/ctranslate2 sanity check
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
 │   ├── stage1_whisperx.sbatch # Stage 1 job — clone this for new GPU jobs
 │   └── gpu_smoke.sbatch       # original GPU/ctranslate2 sanity job
 └── data/                  # raw + derived data — GITIGNORED (PHI)
     ├── inbox/                 # exactly one .wav — the file Stage 1 will process
-    └── stage1/                # Stage 1 output: <stem>.asr.json
+    └── stage1/                # Stage 1 output: <stem>.diarized.json
 ```
 
 The plain-language narrative and this project's task list now live in the
