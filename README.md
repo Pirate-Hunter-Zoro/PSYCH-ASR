@@ -20,6 +20,12 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > `Pirate-Hunter-Zoro/Research-Journey`) and is a **multi-project narrative hub** covering
 > both this project and the sibling `TRD-EHR` project. Start there for "where are we / what's
 > the story"; this project's live task list is `~/Research-Journey/planning/PSYCH-ASR_TODO.txt`.
+>
+> **Division of labour between the two files.** The TODO tracks **only what is left**.
+> Finished work is never annotated there as "DONE" — its entry is deleted, and whatever
+> is durably worth knowing (what exists, where it lives, how it was staged, which traps
+> were paid for) graduates **into this README**. Git history records completion; the TODO
+> records intent. Anyone editing either file, human or agent, follows this.
 
 ---
 
@@ -153,7 +159,17 @@ One-time setup:
 4. **Load offline.** In pipeline code, set `HF_HUB_OFFLINE=1` and call
    `Pipeline.from_pretrained()` with the **absolute local directory**, never the Hub id.
 
-The same download recipe stages any other model (e.g. `faster-whisper` for ASR): one
+**ASR model — `Systran/faster-whisper-large-v3`.** Staged into
+`models/faster-whisper-large-v3` and loaded by absolute path. `scripts/stage_models.sh`
+automates the login-node staging: it activates `asr_env`, sources the git-ignored `.env`
+with auto-export on (so the `hf` CLI actually inherits `HF_TOKEN` — without auto-export
+the token stays shell-local and the download 401s), clears `HF_HUB_OFFLINE` for the
+download only, then runs `hf download --local-dir`. A successful stage leaves seven files
+with `model.bin` at ~3.6 GB; the `.lock` residue under `.cache/huggingface/download/` is
+normal and can be ignored — the half-failed case is locks with *no* real weights beside
+them.
+
+The same download recipe stages any other Hugging Face model: one
 `hf download ... --local-dir models/<name>` on the login node, then load by path.
 
 > **Verify a staged model, don't assume it.** `hf download` can terminate leaving a
@@ -166,9 +182,26 @@ The same download recipe stages any other model (e.g. `faster-whisper` for ASR):
 alignment model to a **torchaudio** bundle (`WAV2VEC2_ASR_BASE_960H`), fetched from
 `download.pytorch.org` into the Torch hub cache — not from the Hugging Face Hub. Setting
 `HF_HUB_OFFLINE=1` therefore does *not* protect this path, and on a node without outbound
-internet it will stall exactly the way an unstaged Hub model does. Warm this cache once
-where there is internet and set `TORCH_HOME` to a persistent directory on study storage in
-every job so the compute node reuses it instead of re-fetching.
+internet it will stall exactly the way an unstaged Hub model does. That cache is warmed on
+the login node by `scripts/stage_models.sh`, which exports `TORCH_HOME` to
+`models/torch_home` on study storage and runs `scripts/warm_align_cache.py`; torch writes
+the 360 MB `wav2vec2_fairseq_base_ls960_asr_ls960.pth` into a `hub/checkpoints` subfolder
+of it, and a re-run reuses it silently. **Every job must export the same `TORCH_HOME`** —
+exporting the variable, not merely having the files on disk, is what makes torch reuse the
+cache instead of re-fetching into `~/.cache`.
+
+**Sentence splitting is a third offline dependency.** WhisperX's alignment step imports
+`nltk` and loads `tokenizers/punkt_tab/english.pickle`, falling back to a live
+`nltk.download()` if the lookup fails — an outbound call that neither `HF_HUB_OFFLINE` nor
+`TORCH_HOME` covers. `scripts/stage_models.sh` downloads the `punkt_tab` package into
+`models/nltk_data` and exports `NLTK_DATA` to it. Note that **`english.pickle` does not
+exist as a file**: `punkt_tab` ships per-language folders of `.tab`/`.txt` data and NLTK
+synthesizes a `PunktTokenizer` from them when that name is requested. The absence of a
+`.pickle` on disk is not a failed download.
+
+**Three environment variables must be exported in every job**, not merely pointed at:
+`HF_HUB_OFFLINE=1`, `TORCH_HOME`, and `NLTK_DATA`. Each library reads its own variable to
+find its cache; having the files on study storage is necessary but not sufficient.
 
 ---
 
@@ -178,8 +211,14 @@ every job so the compute node reuses it instead of re-fetching.
 .
 ├── README.md              # this file (committed)
 ├── .gitignore             # PHI, audio, transcripts, envs all excluded
-├── scripts/               # pipeline code (Stage 0–4); setup_envs.sh builds the env
+├── scripts/               # pipeline code (Stage 0–4)
+│   ├── setup_envs.sh          # builds the asr_env conda prefix env
+│   ├── standardize.sh         # Stage 0: one .m4a path in -> 16 kHz mono WAV in data/
+│   ├── stage_models.sh        # login-node staging of all offline model assets
+│   ├── warm_align_cache.py    # fetches the torchaudio alignment bundle into TORCH_HOME
+│   └── gpu_smoke.py           # GPU/ctranslate2 sanity check
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
+│   └── gpu_smoke.sbatch       # proven GPU-job scaffold — clone it for new GPU jobs
 └── data/                  # raw + derived data — GITIGNORED (PHI)
 ```
 
