@@ -104,8 +104,10 @@ project on this box:
 - **Env:** one conda *prefix* env, `asr_env` (Python 3.11), under
   `/media/studies/ehr_study/analysis/mferguson/venvs/`, built by
   `scripts/setup_envs.sh` (not committed here).
-- **GPU pinning:** jobs select the freest GPU via `nvidia-smi --query-gpu=memory.free`
-  and set `CUDA_VISIBLE_DEVICES` to dodge bare-metal squatters Slurm can't see.
+- **GPUs:** request them with `#SBATCH --gres=gpu:N`. The cluster runs
+  `task/cgroup` with `ConstrainDevices=yes`, so a job sees only its allocated
+  devices and Slurm sets `CUDA_VISIBLE_DEVICES` itself. Jobs log an `nvidia-smi`
+  memory line so a later CUDA OOM is explainable from the log alone.
 - **Model weights (offline):** the login node has outbound internet; the compute
   nodes do not. All model weights are downloaded once into a `models/` directory on
   study storage and loaded from there by absolute path, with `HF_HUB_OFFLINE=1` set
@@ -205,6 +207,46 @@ find its cache; having the files on study storage is necessary but not sufficien
 
 ---
 
+## Running Stage 1
+
+**Input convention: `data/inbox/` holds exactly one `.wav`.** The Stage 1 job takes no
+arguments — it globs the inbox, counts the matches, and aborts with its own message if
+the count is anything other than one, so a mistake surfaces as a one-line error instead
+of a Python traceback (two files silently became a two-line path before the guard
+existed). `standardize.sh` writes its 16 kHz WAV beside the source recording; moving the
+one you want processed into the inbox is a deliberate manual step.
+
+Submit **from the repo root**. The job's log paths and its `scripts/run_whisperx.py`
+invocation are all relative and resolve against the submit directory.
+
+- `slurm_jobs/stage1_whisperx.sbatch` — 1 GPU, 2 h wall, 8 CPUs, 64 G. Loads
+  `Anaconda3/2025.06-0`, activates `asr_env` inside a `set +u` / `set -u` wrap, and
+  exports the four variables every job needs: `PYTHONNOUSERSITE`, `HF_HUB_OFFLINE`,
+  `TORCH_HOME`, `NLTK_DATA`.
+- `scripts/run_whisperx.py` — takes the audio path positionally, plus `--outdir`
+  (default `data/stage1`), `--model-dir` (default the staged
+  `faster-whisper-large-v3`), and `--batch-size` (default 16). Decodes once with
+  `whisperx.load_audio`, loads the ASR model by **absolute local path** with
+  `local_files_only`, `float16`, and language forced to English (skipping per-chunk
+  detection), then transcribes.
+
+**Output:** `data/stage1/<stem>.asr.json` — a dict of `segments` and `language`, where
+each segment carries `start`, `end`, `text`, and `avg_logprob`. That `avg_logprob` is
+the per-segment confidence Stage 2's quality triage runs on. As a working scale, above
+−0.5 is a confident decode and below −1.0 is where Whisper starts hallucinating.
+
+**Status.** The ASR pass is built and verified end to end on a 90-second cut of the
+pilot session: 3 segments, coverage to within 0.03 s of the audio end, `avg_logprob`
+between −0.06 and −0.12. That was opening small talk — the easiest audio in the
+session — so it validates the *plumbing*, not the accuracy. Forced alignment and
+diarization are not yet wired into the script.
+
+Two warnings in the job's stderr are benign and expected: Lightning auto-upgrading the
+checkpoint format of WhisperX's bundled VAD model, and pyannote disabling TF32 matmuls
+for reproducibility (a small speed cost, nothing else).
+
+---
+
 ## Repository layout
 
 ```bash
@@ -216,10 +258,14 @@ find its cache; having the files on study storage is necessary but not sufficien
 │   ├── standardize.sh         # Stage 0: one .m4a path in -> 16 kHz mono WAV in data/
 │   ├── stage_models.sh        # login-node staging of all offline model assets
 │   ├── warm_align_cache.py    # fetches the torchaudio alignment bundle into TORCH_HOME
+│   ├── run_whisperx.py        # Stage 1 entry point: ASR pass (align/diarize pending)
 │   └── gpu_smoke.py           # GPU/ctranslate2 sanity check
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
-│   └── gpu_smoke.sbatch       # proven GPU-job scaffold — clone it for new GPU jobs
+│   ├── stage1_whisperx.sbatch # Stage 1 job — clone this for new GPU jobs
+│   └── gpu_smoke.sbatch       # original GPU/ctranslate2 sanity job
 └── data/                  # raw + derived data — GITIGNORED (PHI)
+    ├── inbox/                 # exactly one .wav — the file Stage 1 will process
+    └── stage1/                # Stage 1 output: <stem>.asr.json
 ```
 
 The plain-language narrative and this project's task list now live in the
