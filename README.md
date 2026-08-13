@@ -22,10 +22,10 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > the story"; this project's live task list is `~/Research-Journey/planning/PSYCH-ASR_TODO.txt`.
 >
 > **Conceptual walkthrough of Stage 1.** A slide deck explaining what
-> `scripts/run_whisperx.py` actually does — component by component, with the input and output
-> shape stated at every step and a worked dummy example for each concept (framing and hop,
-> the mel spectrogram, the encoder's convolutions and self-attention, CTC forced alignment,
-> and what diarization clusters) — lives at
+> `scripts/run_whisperx.py` actually does — a broad tour of what each of the five calls
+> accomplishes, with the input and output stated at every step, a pipeline diagram of how the
+> waveform and the words flow between the three models, and the traps worth knowing (loose
+> Whisper timestamps, why alignment must precede diarization, unlabelled words) — lives at
 > `~/Research-Journey/psych-asr-feasibility/stage1_pipeline_walkthrough.pdf`, built from the
 > `.tex` beside it. Read it before modifying Stage 1.
 >
