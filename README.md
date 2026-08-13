@@ -68,13 +68,18 @@ graph LR
     A[Raw recording .m4a] --> B(Stage 0: Standardize audio<br/>16 kHz mono WAV)
     B --> C[Stage 1: ASR + alignment<br/>Whisper / WhisperX]
     B --> D[Stage 1: Diarization<br/>pyannote]
-    C --> E[Word/segment transcript<br/>timestamps + confidence]
-    D --> F[Speaker turns .rttm]
-    E --> G(Stage 2: Merge + human QC)
+    C --> E[Word transcript<br/>timestamps + confidence]
+    D --> F[Speaker turn table<br/>start / end / speaker]
+    E --> G(Stage 2: Merge + role assignment<br/>+ human QC + WER/DER)
     F --> G
     G --> H[Speaker-labeled transcript<br/>therapist vs patient]
-    H --> I(Stage 3: Feature extraction)
-    I --> J[Structure / behavior / dyadic / content / acoustic features]
+    H --> I1(Stage 3a: Structural)
+    H --> I2(Stage 3b: Acoustic + paralinguistic)
+    B -. raw waveform .-> I2
+    H --> I3(Stage 3c: LLM turn coding<br/>local vLLM)
+    I1 --> J[Session feature table]
+    I2 --> J
+    I3 --> J
     J --> K(Stage 4: Feasibility modeling<br/>responder vs non-responder)
 ```
 
@@ -88,14 +93,26 @@ runs Whisper, forced-aligns to word-level timestamps, and assigns speakers from 
 one pass.
 
 **Stage 2 — Human-in-the-loop QC.** Map anonymous `SPEAKER_00/01` labels to
-therapist/patient, flag and correct mid-session speaker swaps, and hand-correct a
-*stratified subset* to estimate word error rate (WER) and diarization error rate (DER).
+therapist/patient (machine-proposed from lexical cues, human-confirmed), flag and correct
+mid-session speaker swaps, and hand-correct a *stratified subset* to estimate word error
+rate (WER) and diarization error rate (DER).
 
-**Stage 3 — Feature extraction.** Conversation structure (talk-time ratio, turns, turn
-length, speech rate, silence, overlap), therapist behaviors (question types, reflections,
-validation, agenda-setting), patient behaviors (affect, approach/avoidance, hopelessness,
-self-efficacy), dyadic process (e.g. reflection → patient emotion), content themes, and
-acoustic/paralinguistic features (pause duration, pitch variability).
+**Stage 3 — Feature extraction**, deliberately split into three lanes that fail
+independently, ordered by how much they depend on the transcript being right:
+
+- **3a Structural** — talk-time ratio, turn counts and lengths, speech rate, silence,
+  turn-taking latency, overlap and interruptions. Computed from timestamps alone, so it
+  survives a mediocre transcript and is the first thing to build.
+- **3b Acoustic / paralinguistic** — per-word prosody (pitch, loudness, duration) read off
+  the raw waveform at the word boundaries alignment already produced; dimensional affect
+  per turn; and detection of non-verbal vocal events (sighs, breaths, laughter, throat
+  clearing) in the gaps between words. Uses the transcript only for *where to look*, never
+  for *what was said*.
+- **3c Behavioral / content coding** — therapist behaviors (question types, reflections,
+  validation, agenda-setting), patient behaviors (affect, approach/avoidance,
+  hopelessness, self-efficacy), dyadic process, and content themes, coded turn by turn by
+  a locally served LLM. This lane is the one that actually depends on words being correct,
+  and therefore the one whose reliability Stage 2's WER estimate governs.
 
 **Stage 4 — Feasibility modeling.** Do features separate responders from non-responders
 beyond baseline severity and early symptom change?
@@ -130,6 +147,17 @@ system `ffmpeg` 5.1.9 used for Stage 0. The node's CUDA-13.3 driver runs the cu1
 `torch` wheels (backward-compatible); ctranslate2's cuDNN 9 rides in with torch, so
 no system cuDNN is required. pyannote models are gated on Hugging Face — accept the
 terms and download weights once with a token, after which everything runs offline.
+
+**Adding libraries without breaking that pin chain.** Because `whisperx` fixes `torch`
+transitively, any new dependency that pins torch itself is not a package addition but an
+environment fork. The Stage 3b acoustic tools are safe to add in place — `opensmile` and
+`praat-parselmouth` ship self-contained binary wheels and depend on nothing heavier than
+`numpy`/`pandas` — and the Stage 3b model checkpoints load through the `transformers`
+already present. **vLLM is not safe to add in place**: it carries its own torch
+requirement and would drag the whole ASR stack with it. Stage 3c therefore runs from a
+*separate* prefix env, the way the sibling TRD-EHR project already separates its
+`embedder_pipeline` env from its analysis envs. Two envs, one talking to the other over
+HTTP, is the intended shape — not one env that satisfies both.
 
 ### Staging model weights (offline)
 
@@ -369,6 +397,302 @@ Two warnings in the job's stderr are benign and expected: Lightning auto-upgradi
 checkpoint format of WhisperX's bundled VAD model, and pyannote disabling TF32 matmuls
 for reproducibility (a small speed cost, nothing else).
 
+### What Stage 1 currently throws away
+
+Three signals exist inside the run and are discarded before anything is written. All three
+are cheap to keep, and each one is load-bearing for a later stage, so they are the first
+planned change to `run_whisperx.py`.
+
+**The pyannote turn table.** `DiarizationPipeline` returns a DataFrame with one row per
+speaker turn — `start`, `end`, `speaker` — which is handed to `assign_word_speakers` and
+then dropped on the floor. That table is the *only* place overlapping speech survives.
+pyannote's segmentation model is powerset-based and genuinely emits concurrent turns, but
+`assign_word_speakers` resolves each word by intersection-duration argmax against the
+turns, so a word spoken over another speaker gets exactly one label and the fact of the
+overlap vanishes. Everything in the interruption/overlap family of Stage 3a features —
+overlap duration, interruption counts, turn-taking latency, who yields — is computable
+from the turn table and *not* computable from `.diarized.json`. It should be persisted
+per session as its own artifact alongside the JSON.
+
+**Whisper's decode-quality metadata.** `.diarized.json` carries `avg_logprob` per segment
+and a wav2vec2 alignment `score` per word, and those are the two confidence channels
+Stage 2's triage runs on today. Whisper computes more than that:
+
+- `no_speech_prob` — the model's own probability that a chunk contains no speech. Text
+  emitted with a high `no_speech_prob` is the classic hallucination signature: Whisper
+  filling a silence with a plausible-sounding sentence. This is a *different* failure from
+  low `avg_logprob` (uncertain decode of real speech) and catches cases confidence alone
+  misses. WhisperX's batched path already calls ctranslate2's `generate`, which accepts a
+  `return_no_speech_prob` flag and returns the value on the result object; WhisperX simply
+  does not ask for it. Retaining it costs one extra argument and no extra compute.
+- `compression_ratio` — the gzip ratio of the emitted text, the standard detector for a
+  degenerate repetition loop. It needs no model at all and can be computed from the text
+  already in the JSON.
+- `temperature` — **not** a signal here. It records which fallback temperature produced a
+  segment in faster-whisper's *sequential* decoder; WhisperX's batched path does no
+  temperature fallback, so the field would be constant. Noted so nobody goes looking.
+
+Do **not** solve this by running a second pass with faster-whisper's sequential
+`WhisperModel.transcribe` to harvest the full `Segment` dataclass. The two decoders
+segment differently and can produce different text, so the metadata would have to be
+joined back by timestamp overlap and would describe segments we did not keep. Extend the
+pass we already run instead.
+
+**Whisper's encoder states.** The 1280-dimensional per-frame encoder representation from
+large-v3 is a learned acoustic-linguistic embedding and a legitimate feature source, but
+ctranslate2 does not expose it — reaching it means loading the model a second time through
+`transformers`. Recorded as an option, deliberately not planned: the interpretable
+features below are what a grant reviewer can read, and an opaque 1280-dim vector at N=20
+is not.
+
+---
+
+## Stage 2 — QC, role assignment, and error metrics
+
+### Proposing therapist vs patient
+
+Diarization labels are anonymous by construction, so every session needs
+`SPEAKER_00`/`SPEAKER_01` mapped onto therapist and patient. Doing this by hand for the
+pilot is tolerable (60 sessions); doing it for the full trial is not, so the pilot should
+also measure whether the mapping can be proposed automatically.
+
+**Talk time does not decide it.** The obvious heuristic — the therapist talks less — is
+already known to invert: session 1 is the didactic intro where the therapist delivers the
+treatment rationale. Any rule keyed on talk-time share will be confidently wrong on a
+third of the pilot corpus.
+
+What does discriminate, computed per speaker from the transcript and compared *between the
+two speakers within a session* rather than against an absolute threshold (which is what
+keeps it robust to word error):
+
+- **Pronoun ratio.** Second-person rate (`you`, `your`, `you're`) runs high for the
+  therapist; first-person singular (`I`, `me`, `my`) runs high for the patient. This is the
+  single strongest cue and it survives a mediocre transcript, because function words are
+  the words ASR gets right.
+- **Question rate.** Share of that speaker's turns ending in a question mark, plus rate of
+  turn-initial `what` / `how` / `can you` / `tell me`. Higher for the therapist.
+- **Backchannel turns.** Whole turns consisting only of `mm-hm`, `okay`, `right`, `yeah`,
+  `got it`. The listener produces these, and during patient narrative the listener is the
+  therapist.
+- **Turn-initial framing moves.** `So`, `And so`, `Okay so`, `Let's`, `What I'd like to do`
+  — agenda control, therapist-side.
+- **Protocol vocabulary.** Treatment-manual terms (`activity log`, `behavioral
+  activation`, `homework`, `agenda`, `between sessions`) cluster on the therapist.
+
+The output should be a *proposal with its evidence* — per-cue scores for both speakers
+written into the transcript header next to the existing talk-time table — never a silent
+auto-assignment. The human confirms or overrides in the same pass they are already doing
+for QC. Once all 60 sessions carry a human label, the proposal's accuracy against those
+labels is itself a feasibility result worth reporting: it is the difference between
+"someone must listen to every session" and "someone must spot-check."
+
+### Mid-session swaps and error rates
+
+Unchanged in intent: flag and correct speaker swaps, then hand-correct a stratified subset
+to estimate WER and DER. The stratification should be driven by the confidence channels
+above — sample deliberately across the `avg_logprob` range and (once retained) across
+`no_speech_prob`, rather than uniformly at random, so the estimate covers the bad audio
+instead of averaging it away.
+
+---
+
+## Stage 3a — Structural features
+
+Computed from timestamps only. No model, no GPU, no dependence on the words being right —
+which is why this lane is built first and why its features are the ones most likely to
+survive into the grant regardless of how WER lands.
+
+Per session, per speaker: talk time and share of speech (already emitted by the renderer),
+turn count, turn-length distribution, speech rate in words per second of that speaker's own
+speaking time, within-turn pause structure (gaps between consecutive words of the same
+speaker), between-turn latency (the gap from one speaker's last word to the other's first),
+and — from the retained turn table — overlap duration, overlap count, and interruptions
+(overlap that precedes a speaker change, as distinct from a backchannel that does not).
+
+The distinction between an interruption and a backchannel is a real modeling decision, not
+a detail: both are overlap, and only one of them is a rupture. Separating them needs the
+turn table plus the transcript (did the overlapping speaker take the floor, and was their
+overlapping speech a content turn or a `mm-hm`), which is exactly why both artifacts have
+to be persisted.
+
+---
+
+## Stage 3b — Acoustic and paralinguistic features
+
+This lane reads the **raw waveform**, using the transcript only to say *where to look*.
+That decoupling is what makes it robust: a misrecognized word still has correct
+boundaries, because forced alignment placed those boundaries acoustically.
+
+### Per-word prosody
+
+The meeting question was whether tone can be extracted per word. Mechanically yes, with
+one caveat worth stating up front: a word is roughly 300 ms, which is long enough to
+measure **pitch, loudness, and duration** but far too short to measure *emotion*. Per-word
+prosody measures emphasis and stress. Affect is a turn-level quantity (see below).
+
+The clean architecture is one acoustic pass per session, aggregated afterwards at whatever
+granularity a feature needs. **openSMILE** (the `opensmile` Python package, binaries
+bundled, no network at runtime) run in **low-level-descriptor mode** with the
+**eGeMAPSv02** feature set emits a frame-level table at a 10 ms hop covering fundamental
+frequency, loudness, jitter, shimmer, harmonics-to-noise ratio, formants, and spectral
+descriptors. Every word, turn, and session feature is then a windowed aggregate of that one
+table, sliced by timestamps we already have. eGeMAPS is worth preferring over a hand-rolled
+feature set specifically because it is the standard set in computational paralinguistics —
+a reviewer recognizes it, and it needs no defending in a methods section.
+
+Where a genuinely word-scoped pitch contour is wanted (rising terminal, emphatic peak),
+**praat-parselmouth** gives Praat's own F0 and intensity estimation from Python and is the
+reference implementation in speech science.
+
+**Every prosodic feature must be z-scored within speaker within session before it is
+compared across people.** Absolute F0 is mostly a fact about the speaker's vocal tract, not
+about their emotional state; a raw pitch comparison between a therapist and a patient is
+close to a comparison of their sexes. What carries signal is deviation from that speaker's
+own baseline in that session.
+
+### Dimensional affect per turn
+
+For turn-level tone, `audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim` maps a speech
+span to continuous **arousal, dominance, and valence** rather than discrete emotion
+categories. Continuous dimensions are the right choice here: therapy affect does not sort
+cleanly into "angry / sad / happy," and a three-number-per-turn output composes with the
+rest of the feature table where a categorical label does not. It stages offline the same
+way every other model here does. One integration trap: the checkpoint is not a plain
+`AutoModelForAudioClassification` — it uses a custom regression head defined on the model
+card, which has to be reproduced locally for the weights to load.
+
+### Non-verbal vocal events — sighs, huffs, laughter
+
+The meeting's fourth question, and a real feature rather than a curiosity: an audible sigh
+is exactly the kind of moment that would justify a therapist pivoting to grounding or
+relaxation, and it is invisible in a transcript.
+
+**Do not try to get these from Whisper.** Whisper does occasionally emit bracketed
+non-speech tags, but they are suppressed by default, they are inconsistent across chunks,
+and their presence is driven by what the training subtitles happened to annotate. That is
+not a measurement channel.
+
+The right tool is an **audio-event classifier trained on AudioSet**, whose 527-class
+ontology contains precisely the categories at issue: *Sigh*, *Gasp*, *Breathing*, *Groan*,
+*Grunt*, *Throat clearing*, *Sniff*, *Cough*, *Laughter*, *Crying/sobbing*. The Audio
+Spectrogram Transformer checkpoint `MIT/ast-finetuned-audioset-10-10-0.4593` is available
+through `transformers` as an `ASTForAudioClassification` and stages offline exactly like
+the ASR and diarization weights.
+
+Two architectural points do most of the work here:
+
+1. **Run it on the gaps, not on the speech.** The word timestamps and the turn table
+   already partition the session into speech and non-speech. Sighs and breaths live in the
+   silences — between turns, and in intra-turn gaps longer than roughly 400 ms. Classifying
+   only those windows cuts the compute by roughly the talk-time fraction and removes the
+   dominant false-positive source, which is the classifier firing on ordinary speech.
+2. **Attribute the event to a speaker.** An event in a gap belongs to whoever is speaking
+   on either side of it, and when the flanking speakers differ the attribution is genuinely
+   ambiguous and should be recorded as such rather than guessed. A sigh is a different
+   feature depending on whose it is.
+
+The honest caveat, which belongs in the methods section rather than in a footnote: AudioSet
+models are trained on consumer video audio, and their precision on 16 kHz mono clinical
+recordings is unknown. This needs a small hand-labeled validation set before any
+sigh-derived feature is trusted — which is the same "quantify the quality, don't assume
+it" discipline the ASR side already runs on.
+
+---
+
+## Stage 3c — Behavioral and content coding with a local LLM
+
+The features that psychotherapy process research actually cares about — open versus closed
+questions, simple versus complex reflections, validation, agenda-setting, patient
+approach/avoidance language, hopelessness, self-efficacy — are judgments about discourse,
+not string matches. This is the lane the on-prem constraint bites hardest, and it is where
+the sibling `TRD-EHR` project's serving pattern is reused wholesale rather than reinvented.
+
+**The unit of analysis is the turn, not the session.** Asking a model to score a whole
+50-minute session on a fidelity scale produces one unverifiable number. Asking it to assign
+a code to each therapist turn produces hundreds of small, individually checkable judgments
+that aggregate into a session score with a known composition. It also matches the way human
+process-coding manuals are built, which is what makes agreement measurable at all.
+
+**A turn is uncodeable out of context.** Whether a therapist utterance is a reflection is
+defined relative to what the patient just said. The prompt unit is therefore a short
+window — the preceding patient turn plus the therapist turn under judgment — not an
+isolated string.
+
+**Serving.** Clone `TRD-EHR`'s vLLM pattern: a Slurm array where each task starts one
+tensor-parallel server on its own GPU pair, publishes its `http://<node>:<port>` to an
+index-keyed endpoint file that the consumer array reads by task id, runs with prefix
+caching and `--max-num-seqs` pinned to the client's concurrency semaphore. Output shape is
+enforced server-side with guided JSON decoding so the model emits the code object and
+nothing else — no prose preamble, no fence stripping on the client. Judgments are cached in
+a per-shard SQLite database merged by a reduce step, so a re-run resumes nearly free.
+Prefix caching matters more here than it did for TRD-EHR: the coding manual is a long
+shared prompt prefix reused across every turn in the corpus.
+
+**Model choice is an open decision.** `google_medgemma-27b-text-it` is already staged on
+study storage from TRD-EHR, but therapy process coding is a discourse-pragmatics task, not
+a medical-knowledge task, so MedGemma's domain tuning buys little and its instruction
+following is the thing that actually matters. A strong general instruct model in the 30B
+class is the likelier fit and would need staging. Decide this by measuring agreement, not
+by argument.
+
+**Reliability is the deliverable.** Every code the LLM assigns must be validated against
+human coding on a stratified subset, reported as Cohen's κ per code. Codes that reach
+acceptable agreement are usable at full-trial scale; codes that do not are reported as
+not-yet-feasible. That measurement is also the answer to the planning deck's open question
+about how much human coding is necessary: enough to estimate agreement per code, not all of
+it — and the pilot is what establishes how much "enough" is.
+
+---
+
+## Stage 4 — Feasibility modeling
+
+Twenty participants, sessions 1–3, so at most 60 session-level rows and 20 outcome labels.
+That number governs everything.
+
+- **Pre-specify a small feature set.** Feature count has to be cut to single digits before
+  modeling starts, chosen on the reliability evidence from Stages 2 and 3 rather than by
+  searching for what separates the groups. A search over a wide feature table at N=20 will
+  find separation whether or not it exists.
+- **The sampling design is extreme-group.** Ten good and ten poor responders are the tails
+  of the parent trial, not a random sample of it. Extreme-group sampling inflates apparent
+  effect sizes relative to the full trial, so an effect measured here is a *power input for
+  the R21*, not an estimate of the effect the full study would see. This must be stated as
+  a limitation wherever a number is reported.
+- **"Beyond baseline severity and early symptom change"** is a nested-model claim, and at
+  N=20 a nested test with two covariates plus a feature is not credibly powered. The honest
+  form is to report the marginal association and the partial association given baseline,
+  both with intervals, and say plainly that the incremental claim is what the grant is for.
+- **Continuous outcome where available.** Dichotomizing an outcome that exists on a scale
+  throws away power the pilot cannot spare, even though the dichotomy was the sampling
+  device.
+- **Validation, if any, is leave-one-out**, and any reported discrimination is
+  hypothesis-generating. Nothing in Stage 4 is a result.
+
+---
+
+## Overlapping speech — the diarization stress test
+
+The first pilot session is close to the easy case: two people, mostly clean turn-taking,
+one didactic speaker. A recording with substantial simultaneous speech is the real test of
+mono diarization, and one is expected from a collaborator.
+
+Two things should be true before that audio arrives, so that processing it is turnkey:
+
+1. **The turn table is being persisted** (see *What Stage 1 currently throws away*).
+   Without it, an overlap test cannot be scored, because the joined transcript structurally
+   cannot represent two speakers at once.
+2. **The expected failure mode is written down in advance.** `assign_word_speakers` gives
+   each word a single label by intersection-duration argmax, so overlap will not appear as
+   dual-labeled words. It will appear as words attributed to the wrong speaker, words
+   dropped by ASR entirely because the overlapping voices masked them, and turn boundaries
+   in the wrong place. Judging the run against the wrong expectation would read a
+   transcript-level artifact as a diarization failure, or vice versa.
+
+Note that community-1's config sets `embedding_exclude_overlap: true`, so overlapped
+regions are excluded from speaker-embedding extraction and do not contaminate the two
+speaker profiles. That protects clustering *identity* under overlap; it says nothing about
+whether the words in those regions land on the right person.
+
 ---
 
 ## Repository layout
@@ -392,6 +716,13 @@ for reproducibility (a small speed cost, nothing else).
     ├── inbox/                 # exactly one .wav — the file Stage 1 will process
     └── stage1/                # Stage 1 output: <stem>.diarized.json + <stem>.transcript.txt
 ```
+
+Planned additions, in the order the roadmap above builds them (nothing here exists yet):
+a per-session speaker turn table written beside the Stage 1 JSON; `scripts/` modules for
+structural features (Stage 3a), the openSMILE acoustic pass and the non-speech-gap event
+classifier (Stage 3b), and the vLLM turn-coding driver plus its judgment-cache merge
+(Stage 3c), each with an sbatch cloned from `stage1_whisperx.sbatch`; and a `models/`
+staging extension covering the audio-event and dimensional-affect checkpoints.
 
 The plain-language narrative and this project's task list now live in the
 sibling `~/Research-Journey` repo (see the **Companion documentation** note at the
