@@ -21,6 +21,14 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > both this project and the sibling `TRD-EHR` project. Start there for "where are we / what's
 > the story"; this project's live task list is `~/Research-Journey/planning/PSYCH-ASR_TODO.txt`.
 >
+> **Conceptual walkthrough of Stage 1.** A slide deck explaining what
+> `scripts/run_whisperx.py` actually does — component by component, with the input and output
+> shape stated at every step and a worked dummy example for each concept (framing and hop,
+> the mel spectrogram, the encoder's convolutions and self-attention, CTC forced alignment,
+> and what diarization clusters) — lives at
+> `~/Research-Journey/psych-asr-feasibility/stage1_pipeline_walkthrough.pdf`, built from the
+> `.tex` beside it. Read it before modifying Stage 1.
+>
 > **Division of labour between the two files.** The TODO tracks **only what is left**.
 > Finished work is never annotated there as "DONE" — its entry is deleted, and whatever
 > is durably worth knowing (what exists, where it lives, how it was staged, which traps
@@ -238,6 +246,10 @@ invocation are all relative and resolve against the submit directory.
   `faster-whisper-large-v3`), `--batch-size` (default 16), `--diarize-model-dir`
   (default the staged `pyannote-speaker-diarization-community-1`), and
   `--num-speakers` (default 2).
+- `scripts/render_transcript.py` — the readable-transcript renderer. Imported and
+  called by `run_whisperx.py` as its last step, so the job emits both artifacts; also
+  runnable standalone on any existing `.diarized.json` (see **Readable transcript**
+  below).
 
 The script decodes the audio **once** with `whisperx.load_audio` and reuses that array
 for all three passes, so ffmpeg runs a single time:
@@ -269,7 +281,11 @@ session has exactly two people in it, so constraining the count removes both fai
 modes for free. The flag exists rather than a hardcoded 2 in case a session turns out to
 have a third person present.
 
-**Output:** `data/stage1/<stem>.diarized.json` — a dict of `segments`, `word_segments`,
+**Output:** two files per session — `data/stage1/<stem>.diarized.json` (the machine
+artifact, described next) and `data/stage1/<stem>.transcript.txt` (the human reading
+copy, see **Readable transcript** below).
+
+`<stem>.diarized.json` is a dict of `segments`, `word_segments`,
 and `language`. Each segment carries `start`, `end`, `text`, `avg_logprob`, a `words`
 list, and a `speaker` label; each word carries `start`, `end`, `score`, and `speaker`.
 That `avg_logprob` is the per-segment confidence Stage 2's quality triage runs on. As a
@@ -283,17 +299,71 @@ the audio identifies roles, so mapping them to therapist/patient is Stage 2's fi
 > missing key rather than indexing it directly. A few unlabeled items is normal; many
 > means diarization under-covered the audio.
 
+### Readable transcript
+
+The `.diarized.json` is the machine artifact; nobody can read indented JSON with a
+`words` list on every segment against playing audio. `scripts/render_transcript.py`
+renders the same content as a play script and writes
+`data/stage1/<stem>.transcript.txt`. `run_whisperx.py` calls it as its final step (CPU
+only, sub-second, no models), so a single Stage 1 job produces both files. It also runs
+standalone — give it a `.diarized.json` path and optionally `--outdir` (default: beside
+the input) — which is how to re-render after any change to the format without paying for
+another GPU job.
+
+Format: a summary header, then one block per **turn**, where a turn is a run of
+consecutive segments sharing a speaker, collapsed into a single paragraph:
+
+```text
+[03:12] SPEAKER_00
+    So how has the week been since we last talked? ...
+```
+
+Grouping matters because forced alignment re-splits segments at sentence boundaries, so
+one uninterrupted minute of speech arrives as a dozen segments — ungrouped, the file
+reads as a list of sentences rather than a conversation. Timestamps are `mm:ss` with
+minutes deliberately left unbounded (`62:04`, not `1:02:04`) so a single scale matches
+what a media player's position readout shows. Per-word timings stay in the JSON; a
+reading copy is segment-level text only.
+
+The header carries audio span, total speech time, segment and turn counts, and a
+per-speaker table of talk time, share of speech, turns, and segments — printed to the
+job log as well as written into the file. **Talk-time share is the cheapest possible
+diarization sanity check**: two people in a room do not split 97/3, so that number
+falsifies a collapsed clustering from the log alone, before anyone opens the audio. It
+is also the first Stage 3 structural feature, so it is worth having early. The
+denominator is total speech time, not wall-clock span, so silence does not dilute the
+split between the two people.
+
+Segments with no `speaker` key are rendered as `UNKNOWN` rather than dropped or merged
+into the neighbouring turn — a cluster of `UNKNOWN` blocks is itself the diagnostic that
+diarization under-covered the audio, and hiding them would hide that. `UNKNOWN` always
+sorts last in the summary table; it is a diagnostic, not a person.
+
+The `.txt` is session content and therefore PHI. It is written under `data/stage1/`,
+which `.gitignore` excludes wholesale — do not write it anywhere else.
+
 > **`DiarizationPipeline` is not exported at package level.** WhisperX 3.8.6's
 > `__init__.py` lazily exposes only `load_model`, `load_audio`, `load_align_model`,
 > `align`, `assign_word_speakers`, and the logging helpers. `whisperx.DiarizationPipeline`
 > raises `AttributeError`; import the class from `whisperx.diarize`.
 
-**Status.** The ASR pass is verified end to end on a 90-second cut of the pilot session:
-3 segments, coverage to within 0.03 s of the audio end, `avg_logprob` between −0.06 and
-−0.12. That was opening small talk — the easiest audio in the session — so it validates
-the *plumbing*, not the accuracy. Alignment and diarization are written into the script
-but **not yet run**; the full-session run and the human check of diarization quality are
-still open.
+**Status.** All four passes are verified end to end on the **full first pilot session**
+(~50 min): 489 segments, 7,298 words, coverage to 50:39 of a 50:39 file, exactly 2
+speaker labels, 89 turns, and **one** segment left `UNKNOWN` — diarization covered
+essentially the whole transcript. The whole job took roughly three minutes of wall clock
+on one A40, so the 2 h wall-time request is generous by two orders of magnitude and the
+GPU never needed the ASR model freed between passes.
+
+Talk time split **79% / 21%**. That is lopsided but not a collapsed clustering — this is
+session 1, whose own opening states the therapist will do most of the talking to deliver
+the treatment rationale. Expect a more even split from sessions 2–3; if session 1's
+pattern repeats there, *then* suspect the clustering.
+
+What is **not** established: accuracy. Segment counts and talk-time ratios prove the
+plumbing and that diarization produced a plausible two-speaker structure. Whether the
+labels track the actual therapist and patient — and whether they stay correct through the
+middle of the session, where turn-taking gets messy — needs the human check against the
+audio. That is the open item, and nothing downstream should be built before it passes.
 
 Two warnings in the job's stderr are benign and expected: Lightning auto-upgrading the
 checkpoint format of WhisperX's bundled VAD model, and pyannote disabling TF32 matmuls
@@ -312,14 +382,15 @@ for reproducibility (a small speed cost, nothing else).
 │   ├── standardize.sh         # Stage 0: one .m4a path in -> 16 kHz mono WAV in data/
 │   ├── stage_models.sh        # login-node staging of all offline model assets
 │   ├── warm_align_cache.py    # fetches the torchaudio alignment bundle into TORCH_HOME
-│   ├── run_whisperx.py        # Stage 1 entry point: ASR -> align -> diarize
+│   ├── run_whisperx.py        # Stage 1 entry point: ASR -> align -> diarize -> render
+│   ├── render_transcript.py   # .diarized.json -> readable .txt (CPU; also standalone)
 │   └── gpu_smoke.py           # GPU/ctranslate2 sanity check
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
 │   ├── stage1_whisperx.sbatch # Stage 1 job — clone this for new GPU jobs
 │   └── gpu_smoke.sbatch       # original GPU/ctranslate2 sanity job
 └── data/                  # raw + derived data — GITIGNORED (PHI)
     ├── inbox/                 # exactly one .wav — the file Stage 1 will process
-    └── stage1/                # Stage 1 output: <stem>.diarized.json
+    └── stage1/                # Stage 1 output: <stem>.diarized.json + <stem>.transcript.txt
 ```
 
 The plain-language narrative and this project's task list now live in the
