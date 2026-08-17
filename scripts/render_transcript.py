@@ -188,7 +188,7 @@ def main():
     with open(transcript_path) as f:
         transcript = json.load(f)
 
-    # "BL560_session1.diarized.json" -> "BL560_session1" -> "BL560_session1.transcript.txt"
+    # "<stem>.diarized.json" -> "<stem>" -> "<stem>.transcript.txt"
     stem = transcript_path.stem
     if stem.endswith(".diarized"):
         stem = stem[: -len(".diarized")]

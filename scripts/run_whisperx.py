@@ -14,6 +14,7 @@ from whisperx.diarize import DiarizationPipeline
 # Sibling module in scripts/; python scripts/run_whisperx.py puts that dir on sys.path[0].
 from render_transcript import format_summary, write_readable_transcript
 
+
 def main():
     parser = ArgumentParser()
     parser.add_argument("audio", type=str)
@@ -66,7 +67,7 @@ def main():
     speakers = set([s.get('speaker', None) for s in augmented_transcript['segments']]) - set([None])
     num_speakers = len(speakers)
     print(f"Number of segments: {len(augmented_transcript['segments'])}\nLast segment: {augmented_transcript['segments'][-1]['end']}\nDetected language: {augmented_transcript['language']}\nWord count: {len(augmented_transcript['word_segments'])}\nSpeaker count: {num_speakers}", flush=True)
-
+        
     # Readable rendering: consecutive same-speaker segments collapse into one timestamped
     # block, so the file reads as a conversation. CPU-only and instant, so it rides along
     # here rather than needing a second job.
