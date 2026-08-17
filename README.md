@@ -327,6 +327,38 @@ the audio identifies roles, so mapping them to therapist/patient is Stage 2's fi
 > missing key rather than indexing it directly. A few unlabeled items is normal; many
 > means diarization under-covered the audio.
 
+### Words with no speaker — three causes wearing one mask
+
+An unlabeled word looks like a diarization failure and usually is not. Reading
+`whisperx/diarize.py` and `whisperx/alignment.py` in the installed 3.8.6, there are exactly
+three ways `speaker` fails to appear on a word, and they call for three different fixes:
+
+1. **The word has no `start`.** `assign_word_speakers` opens its per-word loop with a skip:
+   no `start` key, `continue`, never queried against the turn table at all. Alignment
+   produces such a word when none of its characters received a timestamp — digits, symbols,
+   and foreign script go through the wildcard emission column and can come back NaN — *and*
+   the sentence-level interpolation fallback could not fill it, which happens only when no
+   other word in that sentence has a timestamp either. This is an **alignment** artifact.
+2. **The word has zero duration.** The overlap test requires the intersection of word and
+   turn to be strictly greater than zero, so a word whose `start` and `end` round to the
+   same millisecond matches nothing even when it sits squarely inside a speaker turn. Also
+   an alignment artifact, and invisible unless you look for it.
+3. **The word is timestamped, real, and overlaps no turn.** Only this one is a genuine
+   diarization-coverage story: pyannote emitted no turn covering that span. With
+   `fill_nearest` off, nothing is assigned.
+
+A fourth case hides from a naive count entirely: a segment that fails alignment outright
+(`no characters in this segment found in model dictionary`, or a start time past the audio
+duration) is appended with an empty `words` list, so its words never exist to be counted as
+missing. Segment count and word count are both silently short.
+
+`scripts/audit_speakers.py` is the diagnostic that separates these — it buckets every
+unlabeled word by cause and cross-tabs it against whether the parent *segment* got a
+speaker, which distinguishes micro-gaps between turns (unlabeled words scattered inside
+labelled segments) from a genuinely uncovered stretch of audio. Cause 3 cannot be confirmed
+from `.diarized.json` alone; it needs the turn table, which is why persisting that table
+(see *What Stage 1 currently throws away*) gates finishing the audit.
+
 ### Readable transcript
 
 The `.diarized.json` is the machine artifact; nobody can read indented JSON with a
@@ -413,6 +445,16 @@ overlap vanishes. Everything in the interruption/overlap family of Stage 3a feat
 overlap duration, interruption counts, turn-taking latency, who yields — is computable
 from the turn table and *not* computable from `.diarized.json`. It should be persisted
 per session as its own artifact alongside the JSON.
+
+Two further fields ride along on the same call and are discarded with it. pyannote 4.x
+returns a `DiarizeOutput` object carrying `speaker_diarization`,
+`exclusive_speaker_diarization`, and `speaker_embeddings`; WhisperX reads only the first
+(and the third when asked). The **exclusive** annotation is the same diarization with the
+per-frame speaker count clamped to one — an overlap-free view of the session. Having both
+gives overlap for free as a set difference, which is a cheaper and less error-prone way to
+locate simultaneous speech than reconstructing it from turn intersections. Reaching it means
+calling the pyannote pipeline directly rather than through `DiarizationPipeline.__call__`,
+which throws the wrapper object away and returns only a DataFrame.
 
 **Whisper's decode-quality metadata.** `.diarized.json` carries `avg_logprob` per segment
 and a wav2vec2 alignment `score` per word, and those are the two confidence channels
@@ -693,6 +735,54 @@ regions are excluded from speaker-embedding extraction and do not contaminate th
 speaker profiles. That protects clustering *identity* under overlap; it says nothing about
 whether the words in those regions land on the right person.
 
+### Turn-resolution knobs — what is actually tunable when people interrupt
+
+The intuition is that somewhere there is a "minimum gap before we cut between speakers"
+parameter, and that shortening it would make the pipeline track rapid exchanges. There is
+such a parameter on each side of the pipeline, they live in different libraries, and only
+one of them is worth touching. Enumerated from the installed sources so nobody goes hunting
+twice:
+
+- **Diarization side: `segmentation.min_duration_off`, and it is already maxed out.**
+  pyannote's `SpeakerDiarization` pipeline exposes exactly one timing hyperparameter, and it
+  *fills* intra-speaker gaps shorter than that many seconds, merging what would otherwise be
+  two turns into one. community-1's `config.yaml` sets it to **0.0** — no filling at all,
+  so every gap the segmentation model detects already becomes a turn boundary. The knob only
+  runs in the merge direction; there is nothing below zero. Turn resolution on this side is
+  therefore a property of the powerset segmentation model, not a setting. Its other
+  parameters (`clustering.threshold` 0.6, `Fa` 0.07, `Fb` 0.8) govern *who* a turn belongs
+  to, not *where* it is cut.
+- **ASR side: `chunk_size`, and this is the one that matters.** WhisperX runs its own
+  bundled VAD before Whisper and merges consecutive speech regions into decode chunks until
+  the accumulated span exceeds `chunk_size` seconds — default **30**. Under heavy
+  interruption a single 30-second chunk spans many speaker changes, Whisper decodes it as
+  one block, and the segments it emits straddle speaker boundaries. Forced alignment
+  re-splits at sentence boundaries afterwards, which softens this but does not fix it: a
+  sentence boundary is not a speaker boundary, and a sentence that two people built together
+  has neither. `chunk_size`, `vad_onset` (0.500), and `vad_offset` (0.363) are all settable
+  through the `vad_options` dict argument of `whisperx.load_model`; nothing in
+  `run_whisperx.py` passes it today, so all three sit at their defaults. Lowering
+  `chunk_size` cuts more often and costs Whisper decoding context — a real WER trade, which
+  is why it is an experiment to run against the overlap recording rather than a default to
+  change on argument.
+- **Not settable through that dict:** the VAD's own `min_duration_on` / `min_duration_off`,
+  both hardcoded to 0.1 s in `whisperx/vads/pyannote.py`'s `load_vad_model`. Changing them
+  means constructing the VAD pipeline yourself and passing it to `load_model` as
+  `vad_model`, which the loader accepts and which then overrides `vad_method`.
+- **Overriding a pyannote parameter, if it ever is worth doing.** `DiarizationPipeline`
+  keeps the underlying pyannote `Pipeline` on its `model` attribute, and that object's
+  `instantiate` method accepts a *partial* nested dict — `segmentation` is itself a
+  sub-pipeline, so passing only its sub-dict re-instantiates that one value and leaves the
+  clustering parameters as the config set them. Prefer this to editing the staged
+  `config.yaml`: the staged model directory should stay a faithful copy of what was
+  downloaded.
+
+The honest summary is that the note's instinct points at the ASR chunker, not the diarizer.
+The diarizer already cuts on every detected pause; it is Whisper's 30-second decode window
+that is coarse. Whether that costs anything on real overlapping speech is an empirical
+question, and the overlap recording is the instrument for answering it — run it once at the
+default and once at a shorter `chunk_size`, and score both against the same turn table.
+
 ---
 
 ## Repository layout
@@ -708,6 +798,7 @@ whether the words in those regions land on the right person.
 │   ├── warm_align_cache.py    # fetches the torchaudio alignment bundle into TORCH_HOME
 │   ├── run_whisperx.py        # Stage 1 entry point: ASR -> align -> diarize -> render
 │   ├── render_transcript.py   # .diarized.json -> readable .txt (CPU; also standalone)
+│   ├── audit_speakers.py      # QC: bucket unlabeled words by cause (in progress)
 │   └── gpu_smoke.py           # GPU/ctranslate2 sanity check
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
 │   ├── stage1_whisperx.sbatch # Stage 1 job — clone this for new GPU jobs
