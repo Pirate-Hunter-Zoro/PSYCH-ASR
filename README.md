@@ -159,6 +159,55 @@ requirement and would drag the whole ASR stack with it. Stage 3c therefore runs 
 `embedder_pipeline` env from its analysis envs. Two envs, one talking to the other over
 HTTP, is the intended shape — not one env that satisfies both.
 
+### Environment architecture
+
+The same reasoning that forks Stage 3c forks the diarization bake-off, and for the same
+cause: a competing diarizer that pins its own `torch` is an environment fork, not a
+package addition. **Planned, not yet built** — only `asr_env` exists today.
+
+| Env | Python / torch | Holds | Why separate |
+| --- | --- | --- | --- |
+| `asr_env` | 3.11 / 2.8.0 | whisperx 3.8.6, pyannote.audio 4.0.7 — ASR, alignment, the community-1 baseline diarizer, and the speaker join | Exists. Pin set is **locked** to whisperx's `~=` chain |
+| `diarizen_env` | 3.10 / 2.1.1+cu121 | DiariZen (MIT code) and its vendored pyannote-audio fork | torch 2.1.1 vs 2.8.0 is a hard conflict — unresolvable in one env |
+| `nemo_env` | 3.11 / NeMo's own | `nemo_toolkit[asr]`, for both Sortformer checkpoints | Drags hydra, lightning, omegaconf and its own `transformers` pin against the locked 4.55.4 |
+| `diar_eval_env` | 3.11 / **none** | `pyannote.metrics` only, CPU | Deliberately torch-free. The scorer must be *one* implementation at *one* collar across every arm, or the comparison measures the scorer instead of the models |
+
+`diar_eval_env` is the one that looks like over-engineering and is not. Folding the scorer
+into `asr_env` risks bumping `pyannote.core` underneath the locked pin set, and it quietly
+couples "how we measure" to "what we measure with."
+
+### The seam that makes this cheap
+
+`whisperx.assign_word_speakers` reads exactly three columns off the diarization
+DataFrame — `start`, `end`, `speaker` — and ignores `segment` and `label` entirely
+(verified in the installed `whisperx/diarize.py`). **Any** diarizer that can emit those
+three fields substitutes in with no change to whisperx and no change to the join.
+
+So the interchange format is **RTTM**, and Stage 1 splits at that seam:
+
+| Step | Env | In | Out |
+| --- | --- | --- | --- |
+| 1a ASR + alignment | `asr_env`, GPU | one 16 kHz WAV | `<stem>.aligned.json` — no speaker keys |
+| 1b diarize | per-model env, GPU | the same WAV | `<stem>.<diarizer>.rttm` |
+| 1c join + render | `asr_env`, CPU | aligned JSON + one RTTM | `<stem>.<diarizer>.diarized.json` + `.transcript.txt` |
+
+RTTM is chosen because it is simultaneously the standard diarization interchange format
+*and* what DER scorers consume. The hypothesis file the bake-off scores and the file the
+join reads are the same artifact — no second serialization to keep in sync.
+
+**The methodological reason for the split, which matters more than the compute saving.**
+Stage 1 currently costs ~3 minutes on one A40, so re-running ASR per diarizer is affordable.
+It is still wrong: Whisper's output would then differ across arms, and a DER comparison would
+be confounded by transcript differences. Running 1a **once** and fanning every diarizer off
+the identical aligned transcript and identical word timings is what makes the arms
+comparable at all.
+
+**The refactor has a built-in regression test.** Job 2032471 (2026-08-12, full ~50 min
+session) produced 489 segments, 7298 words, exactly 2 speaker labels, 89 turns, one UNKNOWN
+segment, 79/21 talk time. Composing 1a → 1b(community-1) → 1c must reproduce those numbers
+exactly. If it does not, the split changed behavior and the difference is a bug, not a
+finding.
+
 ### Staging model weights (offline)
 
 Because compute nodes have no internet, every model is downloaded **once on the login
@@ -206,6 +255,64 @@ One-time setup:
    Do **not** set `HF_HUB_OFFLINE` for the download — only for the later load.
 4. **Load offline.** In pipeline code, set `HF_HUB_OFFLINE=1` and call
    `Pipeline.from_pretrained()` with the **absolute local directory**, never the Hub id.
+
+### Diarization bake-off — candidate models
+
+community-1 is the incumbent, not a verdict. Diarization is the bottleneck the whole project
+is gated on, so the choice deserves a measurement rather than a default. **Planned, not yet
+run.** Every arm stages offline under the same discipline as the weights above.
+
+| Arm | Model | Env | Weights license |
+| --- | --- | --- | --- |
+| baseline | `pyannote/speaker-diarization-community-1` (staged) | `asr_env` | open, self-host free |
+| A | `BUT-FIT/diarizen-wavlm-large-s80-md-v2` | `diarizen_env` | **CC BY-NC 4.0** (code is MIT) |
+| B | `nvidia/diar_sortformer_4spk-v1` (offline) | `nemo_env` | **CC BY-NC 4.0** |
+| C | `nvidia/diar_streaming_sortformer_4spk-v2.1` | `nemo_env` | NVIDIA Open Model License |
+| escalation | `pyannote precision-2` | — | proprietary; on-prem requires an Enterprise contract |
+
+**Licensing is a real constraint here, not boilerplate.** Arms A and B are
+non-commercial-only. For feasibility research at a nonprofit institute that is fine, but the
+stated deliverable is an R21/R01, and an NC weight license is the kind of thing that is
+invisible for two years and then blocks a translation path. Arm C is the only strong
+candidate without that restriction. Record which arm wins *and* whether it can be shipped.
+
+**Why these three challengers.** Both Sortformer variants and DiariZen model overlapping
+speech directly — Sortformer frame-level and multi-label, DiariZen powerset over up to four
+concurrent speakers — where community-1's configuration sets `embedding_exclude_overlap`,
+protecting its speaker profiles by discarding the overlapped regions rather than resolving
+them. Therapist backchannels over patient speech are constant in this corpus and are
+themselves a Stage 3a feature, so how a diarizer treats overlap is not a side issue.
+
+**Published DER numbers across these projects are not comparable and must not be tabled
+together.** DiariZen reports at collar 0 s; the NVIDIA CALLHOME figures use the conventional
+0.25 s collar. A collar forgives boundary error at every speaker change, and the same system
+looks far worse without one. The only numbers that will decide this are the ones measured
+here, on this audio, under one collar setting chosen and stated once.
+
+**Two open questions to settle before trusting any arm:**
+
+- *Can the end-to-end models be pinned to two speakers?* The pyannote path takes an exact
+  `num_speakers` and the pipeline currently pins it to 2. Sortformer is end-to-end with a
+  four-speaker ceiling and no clustering stage to constrain the same way. On a known dyad
+  that constraint is worth real DER, and losing it is a genuine cost of switching.
+- *Do they survive a 50-minute file?* An end-to-end transformer over a full session is a
+  memory question the meeting-corpus benchmarks do not answer. The streaming variant handles
+  arbitrary length by construction, which may turn out to be arm C's decisive advantage
+  independent of accuracy.
+
+### Scoring protocol
+
+One scorer, one collar, every arm — run from `diar_eval_env`.
+
+- **Reference:** the hand-corrected RTTM from Stage 2's stratified subset. That subset is
+  already planned for WER/DER estimation; it is the bake-off's test set, not extra work.
+- **Report DER at both collar 0.25 s and collar 0 s, overlap included**, and say which is
+  which. Overlap-excluded scoring would discard exactly the regime under test.
+- **Decompose DER** into missed speech, false alarm, and speaker confusion. Published
+  benchmarking finds missed speech dominates, and the decomposition says which knob to turn.
+- **Two therapy-specific measures alongside DER**, because DER is a duration-weighted average
+  and can look acceptable while failing where it matters: error in the therapist/patient
+  talk-time ratio, and backchannel attribution accuracy.
 
 **ASR model — `Systran/faster-whisper-large-v3`.** Staged into
 `models/faster-whisper-large-v3` and loaded by absolute path. `scripts/stage_models.sh`
@@ -278,6 +385,12 @@ invocation are all relative and resolve against the submit directory.
   called by `run_whisperx.py` as its last step, so the job emits both artifacts; also
   runnable standalone on any existing `.diarized.json` (see **Readable transcript**
   below).
+
+> **This single-job shape is scheduled to split.** The diarization bake-off requires 1a
+> (ASR + alignment), 1b (diarize, one job per candidate env), and 1c (join + render) as
+> separate steps exchanging RTTM — see **The seam that makes this cheap** above. What is
+> described below is the current, working four-pass script; the split preserves every pass
+> and must reproduce job 2032471's numbers exactly.
 
 The script decodes the audio **once** with `whisperx.load_audio` and reuses that array
 for all three passes, so ffmpeg runs a single time:
@@ -660,7 +773,18 @@ defined relative to what the patient just said. The prompt unit is therefore a s
 window — the preceding patient turn plus the therapist turn under judgment — not an
 isolated string.
 
-**Serving.** Clone `TRD-EHR`'s vLLM pattern: a Slurm array where each task starts one
+**Serving.** The inference stack itself is not part of this repo. It lives in the sibling
+`libr-local-llm` (`~/libr-local-llm`), which is shared infrastructure for this project and
+`TRD-EHR` both — Ollama installed user-local and served on Slurm GPU nodes, with the vLLM
+path for this stage still to be built. Its README carries the bootstrap sequence,
+environment variables, and the traps already paid for; the remaining task list is
+`Research-Journey/planning/LOCAL-LLM_TODO.txt`. **Whatever drives this stage must have no
+tool-calling surface** — no web fetch, no search, nothing that can put a fragment of a
+session into an outbound request. That is a hard requirement of the on-prem constraint at
+the top of this README, not a preference, and it is why the clinical path is a plain Python
+client rather than a tool-enabled coding agent.
+
+Clone `TRD-EHR`'s vLLM pattern: a Slurm array where each task starts one
 tensor-parallel server on its own GPU pair, publishes its `http://<node>:<port>` to an
 index-keyed endpoint file that the consumer array reads by task id, runs with prefix
 caching and `--max-num-seqs` pinned to the client's concurrency semaphore. Output shape is
@@ -826,6 +950,10 @@ top of this README); the former `writeup/` directory was relocated there.
 - Recordings are **identifiable PHI**; participant IDs appear in filenames.
 - `.gitignore` excludes all audio, converted audio, transcripts, diarization output
   (`.rttm/.srt/.vtt`), and structured feature files (`.json/.csv/.parquet`) by default.
-- All processing is **on-prem**; no external/cloud inference.
+- All processing is **on-prem**; no external/cloud inference. Local inference runs through the
+  sibling `libr-local-llm` repo, whose loopback-only endpoint and default-deny web-tool
+  configuration exist to keep that true. Any model or agent that reads transcripts must have
+  no tool-calling surface at all: a tool-enabled agent placing a session fragment into a
+  search query is an exfiltration event under this constraint, not a bug.
 - Raw and derived data live under `data/` (gitignored) or on study storage — never in the
   tracked tree.
