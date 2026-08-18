@@ -641,6 +641,43 @@ for QC. Once all 60 sessions carry a human label, the proposal's accuracy agains
 labels is itself a feasibility result worth reporting: it is the difference between
 "someone must listen to every session" and "someone must spot-check."
 
+### Domain lexicon — local place names and drug names
+
+Whisper spells what it thinks it heard, and the two vocabularies this corpus is guaranteed to
+contain are exactly the two it has the least support for: **Oklahoma place names** (Tahlequah,
+Okmulgee, Bartlesville, Pawhuska, Chouteau, Sapulpa, Owasso) and **psychotropic drug names**
+(fluoxetine, sertraline, escitalopram, bupropion, quetiapine, lamotrigine, aripiprazole). Both
+are cases where the spoken form is a poor guide to the written one — a therapist says
+*floo-OX-uh-teen* and the model writes something phonetically defensible and lexically wrong —
+and both are proper nouns, so a mis-spelling is not a near-miss that a downstream string match
+will forgive. It silently becomes a different token.
+
+Two levers exist, at different stages, and they are not substitutes:
+
+- **Bias the decode (Stage 1).** `whisperx.load_model` accepts an `asr_options` dict, and the
+  installed stack passes both `initial_prompt` and `hotwords` straight through to faster-whisper's
+  prompt construction. `run_whisperx.py:40` currently passes neither, so both sit at their `None`
+  defaults. Both end up in the same `sot_prev` region of the prompt — hotword tokens first, prior
+  context after — and that region is capped at half the model's maximum prompt length, so the
+  lexicon competes for a bounded budget and cannot simply be the whole formulary. `hotwords` is
+  the better fit of the two here: it is meant for exactly this (a bare term list, no sentence
+  scaffolding), whereas `initial_prompt` is a style/context prefix that Whisper can echo into the
+  transcript. Note that faster-whisper drops hotwords entirely when `prefix` is set, so do not set
+  both.
+- **Normalize after the fact (Stage 2).** Decode biasing is probabilistic and will not catch
+  everything, so the QC pass should also carry an explicit lexicon file — the canonical spelling
+  plus the misrenderings actually observed in the pilot — and flag near-misses for the human
+  already reading the transcript. The pilot is the only chance to collect that error list cheaply,
+  since 60 hand-checked sessions produce it as a by-product. Build the file from what the corpus
+  actually gets wrong, not from a general formulary; a list assembled by imagination is mostly
+  dead weight against a bounded prompt budget.
+
+The clinically important asymmetry: a wrong place name costs a de-identification review a little
+work, but a wrong **drug** name is a content error in exactly the channel Stage 3c is supposed to
+code. Weight the lexicon accordingly, and treat drug-name accuracy as its own small reportable
+number in the WER analysis rather than letting it average into overall word error, where a handful
+of rare tokens vanishes.
+
 ### Mid-session swaps and error rates
 
 Unchanged in intent: flag and correct speaker swaps, then hand-correct a stratified subset
