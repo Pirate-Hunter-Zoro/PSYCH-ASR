@@ -163,18 +163,34 @@ HTTP, is the intended shape — not one env that satisfies both.
 
 The same reasoning that forks Stage 3c forks the diarization bake-off, and for the same
 cause: a competing diarizer that pins its own `torch` is an environment fork, not a
-package addition. **Planned, not yet built** — only `asr_env` exists today.
+package addition. All four now exist, built by `scripts/setup_envs.sh`, each ending in its
+own import smoke-check.
 
 | Env | Python / torch | Holds | Why separate |
 | --- | --- | --- | --- |
-| `asr_env` | 3.11 / 2.8.0 | whisperx 3.8.6, pyannote.audio 4.0.7 — ASR, alignment, the community-1 baseline diarizer, and the speaker join | Exists. Pin set is **locked** to whisperx's `~=` chain |
-| `diarizen_env` | 3.10 / 2.1.1+cu121 | DiariZen (MIT code) and its vendored pyannote-audio fork | torch 2.1.1 vs 2.8.0 is a hard conflict — unresolvable in one env |
-| `nemo_env` | 3.11 / NeMo's own | `nemo_toolkit[asr]`, for both Sortformer checkpoints | Drags hydra, lightning, omegaconf and its own `transformers` pin against the locked 4.55.4 |
-| `diar_eval_env` | 3.11 / **none** | `pyannote.metrics` only, CPU | Deliberately torch-free. The scorer must be *one* implementation at *one* collar across every arm, or the comparison measures the scorer instead of the models |
+| `asr_env` | 3.11 / 2.8.0+cu128 | whisperx 3.8.6, pyannote.audio 4.0.7 — ASR, alignment, the community-1 baseline diarizer, and the speaker join | Pin set is **locked** to whisperx's `~=` chain |
+| `diarizen_env` | 3.10 / 2.1.1+cu121 | DiariZen (MIT code) and its vendored pyannote-audio fork (reports itself as pyannote.audio 3.1.1) | torch 2.1.1 vs 2.8.0 is a hard conflict — unresolvable in one env |
+| `nemo_env` | 3.11 / 2.13.0+cu130 | `nemo_toolkit[asr]` 2.7.3, for both Sortformer checkpoints | Drags hydra, lightning, omegaconf and its own `transformers` pin against the locked 4.55.4 |
+| `diar_eval_env` | 3.11 / **none** | `pyannote.metrics` 3.2.1 only, CPU | Deliberately torch-free. The scorer must be *one* implementation at *one* collar across every arm, or the comparison measures the scorer instead of the models |
 
 `diar_eval_env` is the one that looks like over-engineering and is not. Folding the scorer
 into `asr_env` risks bumping `pyannote.core` underneath the locked pin set, and it quietly
 couples "how we measure" to "what we measure with."
+
+**DiariZen is a source install, not a package.** It is not on PyPI, and it vendors its own
+`pyannote-audio` fork *in-tree* rather than depending on the released one — the upstream
+pipeline will not accept the raw powerset segmentation checkpoint that DiariZen's subclass
+needs. `setup_envs.sh` therefore clones
+`github.com/BUTSpeechFIT/DiariZen` into `/media/studies/ehr_study/analysis/mferguson/src/`
+and installs three things in order: the cu121 torch trio, the requirements, then the
+package and the vendored fork as editable installs. Every step after the first passes
+`-c constraints.txt`, which re-pins `torch` and `numpy` so that neither the requirements nor
+the fork can drag torch forward underneath the install. The only true git submodule in that
+repo is `dscore`, and it is not needed — scoring happens in `diar_eval_env`.
+
+**`pyannote.metrics` needs `typing_extensions` and does not declare it.** A clean env built
+from `pyannote.metrics` alone fails on its own first import. It is pinned explicitly in
+`setup_envs.sh`; do not remove it on the grounds that nothing appears to use it.
 
 ### The seam that makes this cheap
 
@@ -185,11 +201,20 @@ three fields substitutes in with no change to whisperx and no change to the join
 
 So the interchange format is **RTTM**, and Stage 1 splits at that seam:
 
-| Step | Env | In | Out |
-| --- | --- | --- | --- |
-| 1a ASR + alignment | `asr_env`, GPU | one 16 kHz WAV | `<stem>.aligned.json` — no speaker keys |
-| 1b diarize | per-model env, GPU | the same WAV | `<stem>.<diarizer>.rttm` |
-| 1c join + render | `asr_env`, CPU | aligned JSON + one RTTM | `<stem>.<diarizer>.diarized.json` + `.transcript.txt` |
+| Step | Script | Env | In | Out |
+| --- | --- | --- | --- | --- |
+| 1a ASR + alignment | `run_asr.py` | `asr_env`, GPU | one 16 kHz WAV | `<stem>.aligned.json` — no speaker keys |
+| 1b diarize | `diarize_pyannote.py` / `diarize_diarizen.py` / `diarize_sortformer.py` | per-model env, GPU | the same WAV | `<stem>.<arm>.rttm` |
+| 1c join + render | `join_speakers.py` | `asr_env`, CPU | aligned JSON + one RTTM | `<stem>.<arm>.diarized.json` + `<stem>.<arm>.transcript.txt` |
+
+`scripts/rttm_io.py` is the shared reader/writer. It is imported from **all four** envs,
+whose torch and numpy pins are mutually incompatible, so it imports nothing at module scope
+beyond the standard library — `pandas` is imported inside the one function that returns the
+DataFrame shape `assign_word_speakers` wants.
+
+**The arm name is carried in every filename from 1b onward.** Which transcript came from
+which diarizer is a property of the file, not of a note somewhere — and 1c derives the arm
+from the RTTM's own name, so adding a fifth arm needs no change to the join.
 
 RTTM is chosen because it is simultaneously the standard diarization interchange format
 *and* what DER scorers consume. The hypothesis file the bake-off scores and the file the
@@ -259,16 +284,20 @@ One-time setup:
 ### Diarization bake-off — candidate models
 
 community-1 is the incumbent, not a verdict. Diarization is the bottleneck the whole project
-is gated on, so the choice deserves a measurement rather than a default. **Planned, not yet
-run.** Every arm stages offline under the same discipline as the weights above.
+is gated on, so the choice deserves a measurement rather than a default. All four arms are
+staged, scripted and runnable; none is *scored* yet, because scoring needs the reference
+RTTM that Stage 2's hand-correction pass produces.
 
-| Arm | Model | Env | Weights license |
-| --- | --- | --- | --- |
-| baseline | `pyannote/speaker-diarization-community-1` (staged) | `asr_env` | open, self-host free |
-| A | `BUT-FIT/diarizen-wavlm-large-s80-md-v2` | `diarizen_env` | **CC BY-NC 4.0** (code is MIT) |
-| B | `nvidia/diar_sortformer_4spk-v1` (offline) | `nemo_env` | **CC BY-NC 4.0** |
-| C | `nvidia/diar_streaming_sortformer_4spk-v2.1` | `nemo_env` | NVIDIA Open Model License |
-| escalation | `pyannote precision-2` | — | proprietary; on-prem requires an Enterprise contract |
+| Arm | Model | `--arm` name | Env | Weights license |
+| --- | --- | --- | --- | --- |
+| baseline | `pyannote/speaker-diarization-community-1` | `community-1` | `asr_env` | open, self-host free |
+| A | `BUT-FIT/diarizen-wavlm-large-s80-md-v2` | `diarizen` | `diarizen_env` | **CC BY-NC 4.0** (code is MIT) |
+| B | `nvidia/diar_sortformer_4spk-v1` (offline) | `sortformer` | `nemo_env` | **CC BY-NC 4.0** |
+| C | `nvidia/diar_streaming_sortformer_4spk-v2.1` | `sortformer-streaming` | `nemo_env` | NVIDIA Open Model License |
+| escalation | `pyannote precision-2` | — | — | proprietary; on-prem requires an Enterprise contract |
+
+None of the three challengers is gated on Hugging Face, so unlike the pyannote weights they
+need no click-through before download.
 
 **Licensing is a real constraint here, not boilerplate.** Arms A and B are
 non-commercial-only. For feasibility research at a nonprofit institute that is fine, but the
@@ -326,6 +355,32 @@ them.
 
 The same download recipe stages any other Hugging Face model: one
 `hf download ... --local-dir models/<name>` on the login node, then load by path.
+`stage_models.sh` now also pulls the three bake-off challengers this way
+(`diarizen-wavlm-large-s80-md-v2`, `diar_sortformer_4spk-v1`,
+`diar_streaming_sortformer_4spk-v2.1`) plus the WeSpeaker embedder DiariZen needs — about
+1.8 GB in total, which is small enough that the staging step is not the slow part of
+anything.
+
+**How each challenger reaches its weights offline**, since all three differ from the
+`Pipeline.from_pretrained(<dir>)` pattern community-1 uses:
+
+- **Sortformer (both arms)** loads from the `.nemo` archive with
+  `SortformerEncLabelModel.restore_from`, which reads the file directly and makes no Hub
+  call at all. NVIDIA's cards use `from_pretrained` with a token; `restore_from` is the
+  offline equivalent and takes `strict=False`. Arm B's repo also ships transformers-native
+  safetensors beside the archive; they are downloaded and unused, because arm C ships no
+  such thing and one loading path across both arms is worth more than saving 500 MB.
+- **DiariZen** is the awkward one. `DiariZenPipeline.from_pretrained()` calls
+  `snapshot_download` and `hf_hub_download` internally, so it wants either the network or a
+  directory in Hugging Face *cache* layout — which is not the `--local-dir` layout
+  everything else here uses. `scripts/diarize_diarizen.py` sidesteps it by constructing the
+  pipeline directly from two absolute paths, which is all `from_pretrained` does once its
+  two downloads resolve: the model hub directory, and the WeSpeaker embedder's
+  `pytorch_model.bin` as a plain file path.
+- **DiariZen's WavLM is not a third download.** Its `config.toml` names
+  `wavlm_src = "wavlm_large_s80_md"`, which looks like a repo id and is not — it resolves to
+  a hardcoded configuration dict in `diarizen/models/module/wavlm_config.py`, and the pruned
+  WavLM weights themselves are inside the 278 MB `pytorch_model.bin`. Nothing to stage.
 
 > **Verify a staged model, don't assume it.** `hf download` can terminate leaving a
 > directory that contains only `README.md` and empty weight subfolders, with lock files
@@ -386,11 +441,11 @@ invocation are all relative and resolve against the submit directory.
   runnable standalone on any existing `.diarized.json` (see **Readable transcript**
   below).
 
-> **This single-job shape is scheduled to split.** The diarization bake-off requires 1a
-> (ASR + alignment), 1b (diarize, one job per candidate env), and 1c (join + render) as
-> separate steps exchanging RTTM — see **The seam that makes this cheap** above. What is
-> described below is the current, working four-pass script; the split preserves every pass
-> and must reproduce job 2032471's numbers exactly.
+> **The split now exists alongside this.** `run_whisperx.py` and its sbatch remain the
+> single-job path for one session against the incumbent diarizer, and they are unchanged.
+> The 1a/1b/1c chain described in **Running the diarization bake-off** below is what to use
+> for anything comparing diarizers, and it is the path that will absorb new arms. The four
+> passes below are the same four passes; the split only moves where each one runs.
 
 The script decodes the audio **once** with `whisperx.load_audio` and reuses that array
 for all three passes, so ffmpeg runs a single time:
@@ -541,6 +596,219 @@ audio. That is the open item, and nothing downstream should be built before it p
 Two warnings in the job's stderr are benign and expected: Lightning auto-upgrading the
 checkpoint format of WhisperX's bundled VAD model, and pyannote disabling TF32 matmuls
 for reproducibility (a small speed cost, nothing else).
+
+---
+
+## Running the diarization bake-off
+
+Same input convention as Stage 1: `data/inbox/` holds exactly one `.wav`, and every job
+globs it and guards on the count. Submit **from the repo root** — all paths are relative to
+the submit directory.
+
+```bash
+bash slurm_jobs/run_bakeoff.sh
+```
+
+That submits the whole chain as one dependency graph and prints the job ids:
+
+```text
+1a ASR + align  ──┬─> 1b community-1          (asr_env,      GPU)  ──┐
+                  ├─> 1b diarizen             (diarizen_env, GPU)  ──┤
+                  ├─> 1b sortformer           (nemo_env,     GPU)  ──┼─> 1c join + render
+                  └─> 1b sortformer-streaming (nemo_env,     GPU)  ──┘   (asr_env, CPU)
+```
+
+**The dependency kinds are not interchangeable.** The 1b jobs depend on 1a with `afterok` —
+there is nothing to diarize against if the transcript never landed. 1c depends on the four
+arms with **`afterany`**, so one arm crashing still produces transcripts for the others; a
+dead arm then shows up as a missing file, which is a result rather than a silent gap. 1c
+iterates over whatever RTTMs exist rather than a fixed arm list, for the same reason.
+
+**1c asks for no GPU.** It loads no models — a timestamp join and a text render, seconds of
+CPU per arm — so it runs on `c3_short` rather than occupying `c3_accel`, which is the single
+four-GPU node the arms themselves need.
+
+Individual jobs run standalone too (`sbatch slurm_jobs/stage1b_diarizen.sbatch`), which is
+how to re-run one arm without paying for the rest.
+
+### Artifacts, and which model produced which
+
+| File | Written by | Holds |
+| --- | --- | --- |
+| `<stem>.aligned.json` | 1a | words + timings, **no speaker keys** |
+| `<stem>.<arm>.rttm` | 1b | that arm's speaker turn table |
+| `<stem>.community-1.exclusive.rttm` | 1b baseline | the same diarization with per-frame speaker count clamped to 1 |
+| `<stem>.<arm>.diarized.json` | 1c | the machine artifact, one per arm |
+| `<stem>.<arm>.transcript.txt` | 1c | the readable transcript, one per arm |
+| `<stem>.arm_comparison.json` | `compare_arms.py` | the word-level diff between arms |
+
+**The turn table is no longer thrown away** — it is the RTTM, and it is the same file the
+DER scorer will consume. That closes the first of the three items under *What Stage 1
+currently throws away* below, for the bake-off path. The baseline arm additionally persists
+`exclusive_speaker_diarization`, which is what makes overlapping speech recoverable as a set
+difference rather than reconstructed from turn intersections.
+
+### The regression gate
+
+The 1c job ends by running `scripts/check_split_regression.py`, comparing the baseline arm's
+output through the split against the pre-split fixture from job 2032471. It reports two
+levels separately: **structure** (segment/word/turn counts, speaker labels, unlabeled counts,
+talk-time shares), where a mismatch means the refactor changed behavior and is a bug; and
+**exact fields**, where a mismatch with matching structure is worth reading before worrying
+about, since Whisper decodes in float16 on a GPU and is not bit-reproducible across runs.
+
+### What differs per arm, and why it is a finding rather than a detail
+
+- **Pinning the speaker count works differently in all three, and in one of them the
+  obvious knob is a decoy.** On the baseline, `--num-speakers 2` is an exact count passed
+  straight to pyannote. Sortformer is end-to-end with a hard four-speaker ceiling and no
+  clustering stage to constrain at all, so `diarize_sortformer.py` accepts `--num-speakers`
+  for flag compatibility and **ignores it, saying so in the log**. On a known dyad that
+  constraint is worth real DER, so losing it is a genuine cost of switching.
+
+  DiariZen is the decoy. Its `__call__` passes `min_clusters` / `max_clusters` into the
+  clustering, which reads exactly like the knob — and `VBxClustering.__call__` in the
+  vendored fork declares all three count arguments *"not used but kept for compatibility"*
+  and ignores them. Clamping `min_speakers` / `max_speakers` alone returned **four** clusters
+  on a two-person session. The count actually falls out of VBx, which is seeded by an
+  agglomerative pass: `fcluster(dendrogram, ahc_threshold, criterion=ahc_criterion)`. With
+  the shipped criterion `distance` the threshold is a dendrogram cut height (0.6). Switching
+  the criterion to `maxclust` makes scipy read that same threshold as a **maximum number of
+  clusters**, and VBx only ever prunes components, never adds them — so seeding it at 2 pins
+  the clustering at ≤2. That is what `--num-speakers` does on this arm.
+
+  **It still emits three labels, and the third is not a person.** `constrained_argmax` fills
+  its output with a `-2` "unassigned" sentinel and then solves a one-to-one assignment per
+  chunk, so a local speaker with no cluster left to take keeps the `-2`. `VBxClustering`
+  then ends with `np.unique(hard_clusters, return_inverse=True)` to renumber the labels —
+  and `-2` is a value like any other, so it becomes **cluster 0** and every real cluster
+  shifts up by one. Upstream pyannote's clustering classes do not do this; it is specific to
+  the fork DiariZen vendors. The phantom is therefore always label `0`, always tiny (4.1 s
+  of 2362 s on the pilot session, 0.17%), and made of overlap regions where the powerset
+  segmentation found more concurrent speakers than there were clusters to hold them.
+  `diarize_diarizen.py` prints a warning naming it and **does not delete it** — the RTTM
+  stays a faithful record of what the model emitted, and the phantom shows up in the
+  rendered transcript as a speaker with ~0% talk time, which is visible rather than hidden.
+
+  Because pinning it is a deviation from the checkpoint's published configuration, **both
+  ways are run and reported separately**: `diarizen` (pinned) and `diarizen-free`
+  (`--num-speakers 0`, shipped config). Denying a challenger the two-speaker fact that the
+  baseline is given would compare it on worse footing; hiding that the deviation happened
+  would be worse still.
+- **Arm B does not survive a 50-minute file unaided.** NVIDIA's own model card puts the
+  ceiling near 12 minutes on a 48 GB RTX A6000; the A40 has 46 GB and a pilot session is
+  ~50 minutes. `diarize_sortformer.py` therefore windows the audio (10 min windows, 1 min
+  overlap) and stitches the results itself. Arm C handles arbitrary length by construction,
+  which may turn out to be its decisive advantage independent of accuracy.
+- **The stitcher is machinery only arm B needs, and it can be wrong.** Each window numbers
+  its speakers independently, so consecutive windows are matched on the overlap region by
+  the one-to-one pairing that maximizes frame agreement, solved as a linear assignment so
+  two local speakers can never collapse onto one global label. A local speaker with no
+  overlap evidence gets a free slot rather than a guess. Each window contributes the
+  timeline up to the *midpoint* of its overlap with the next, keeping every accepted second
+  away from a window edge where an end-to-end model has least context, and same-speaker
+  turns that a seam cut in half are rejoined so the seam does not inflate arm B's turn count.
+  **Some of arm B's error will be seam error rather than model error**, and that belongs in
+  the writeup.
+
+### Bake-off status — first full run, 2026-08-23
+
+All five arms ran end to end on the first pilot session (`<stem>`, ~50 min), off one
+Stage 1a transcript: 489 aligned segments, 7,298 words. The 1a/1b/1c split reproduced the
+pre-split fixture from job 2032471 **byte-identically** — same segments, words, turns,
+speaker labels, unlabeled counts and talk-time shares — so the refactor is behavior-preserving
+and differences between arms are attributable to the diarizers.
+
+| Arm | Turns | Labels | Speech covered | Overlap | Talk-time split | Unlabeled words |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| community-1 | 1023 | 2 | 2381 s | 10.9 s (0.5%) | 79.2 / 20.8 | 5 |
+| diarizen (pinned) | 1128 | 3† | 2362 s | 34.7 s (1.5%) | 79.2 / 20.8 | 3 |
+| diarizen-free | 1136 | 4† | 2362 s | 34.7 s (1.5%) | 79.0 / 20.7 | 3 |
+| sortformer (windowed) | 1111 | 2 | 2367 s | 24.2 s (1.0%) | 79.1 / 20.9 | 2 |
+| sortformer-streaming | 1028 | 4 | 2551 s | 27.1 s (1.1%) | 79.3 / 20.6 | 2 |
+
+† includes the sentinel phantom described above. Both Sortformer arms' extra labels are
+also micro-clusters — 2.0 s and 3.7 s for the streaming arm — not people.
+
+**Pairwise word-level agreement is 99.3–99.7% across every pair.** Only 88 words of 7,298
+(1.2%) are disputed by any arm, in 57 regions, of which just 6 run to three words or more.
+
+**The honest reading: this session cannot decide the bake-off.** Every arm recovers the same
+two-speaker structure and the same 79/21 split, and they differ on roughly one word in eighty.
+That is what the TODO predicted — session 1 is close to the easy case (two people, mostly
+clean turn-taking, one didactic speaker), which is precisely the regime where a diarizer that
+models overlap directly has nothing to show for it. Overlap accounts for 0.5–1.5% of covered
+speech here. **The overlap-stress recording is the instrument that will separate these arms**;
+running it is the next thing that changes the answer, not more analysis of this one.
+
+Three things this run *does* establish, none of which needed the reference RTTM:
+
+1. **Arm B survives a 50-minute file, but only through the windowing.** Six 10-minute windows
+   at 60 s overlap, each returning exactly 2 local speakers, stitched to 2 global speakers.
+   NVIDIA's ~12-minute ceiling is real; the workaround holds.
+2. **Arm C covers ~190 s more speech than every other arm** (2551 s vs 2362–2381 s). With no
+   reference that is not yet an error — it is either better recall of quiet speech or false
+   alarm, and DER decomposition against the hand-corrected subset is what tells them apart.
+   It is the one number in the table that does not look like everything else.
+3. **Neither Sortformer arm can be pinned, and the offline one did not need to be** — it
+   returned exactly two speakers unprompted. The streaming arm returned four, two of them
+   micro-clusters totalling 5.7 s.
+
+**A privacy note worth recording**: NeMo ships a telemetry logger (OneLogger). The job log
+records it initializing with *no exporters configured*, so nothing is collected or
+transmitted. Confirm that line is still present in the log if NeMo is ever upgraded.
+
+### Comparing the arms — do the mechanical diff first
+
+`scripts/compare_arms.py` (CPU, `asr_env`, no models) exploits the fact the split was built
+for: because 1a ran once, every arm sits on the **identical word sequence with identical word
+timings**, so the only thing that can differ between two arms is the speaker label on each
+word. Comparing four 50-minute transcripts is therefore not a reading task — it is an exact
+diff over one column.
+
+It canonicalizes each arm's arbitrary labels onto the baseline's namespace before comparing
+(`SPEAKER_00` here and `speaker_1` there may be the same person; without the remap two arms
+that agree perfectly would score 0%), then reports per-arm label and unlabeled-word counts,
+talk-time split, pairwise word-level agreement, and every contiguous disagreement region with
+surrounding context — written to `<stem>.arm_comparison.json` as the work queue for whatever
+adjudicates them.
+
+Agreement between arms is **not accuracy**: four arms can agree and all be wrong. What this
+produces is the map of *where* they disagree, which is what makes the human listening pass
+affordable. The hand-corrected reference RTTM from Stage 2 is what actually scores the arms.
+
+### Scoring the arms — `scripts/score_arms.py`
+
+Run from `diar_eval_env`. **It cannot produce a real number until the reference exists**: the
+hand-corrected RTTM from Stage 2's stratified subset, which is the bake-off's test set and is
+not extra work — the same subset already planned for WER/DER, used twice rather than built
+twice. Its plumbing is verified end to end (scoring the baseline arm against itself returns
+0.00% DER at both collars, 0.0% ratio error and 18/18 backchannels, which is the check that
+the implementation is not lying).
+
+Four measures per arm:
+
+- **DER at collar 0.25 s and collar 0 s, overlap included**, decomposed into missed speech,
+  false alarm and speaker confusion. Both collars, always, because the same system looks far
+  worse without one — on this audio the two differ by roughly a factor of two — and because
+  the decomposition is what says which knob to turn: a false-alarm problem and a confusion
+  problem call for opposite fixes.
+- **Talk-time ratio error.** DER is a duration-weighted average and can look acceptable while
+  failing exactly where this project cares. Talk-time share is the first Stage 3a feature and
+  an input to role assignment, so an arm with good DER and a bad ratio is useless here.
+- **Backchannel attribution accuracy.** Therapist backchannels over patient speech are
+  constant in this corpus, they are the overlap the challengers exist to model, and they are
+  short enough to vanish inside a duration-weighted average. **One arm's transcript defines
+  the backchannel spans for every arm** (`--backchannel-source`, default `community-1`) — the
+  spans need the words, which an RTTM does not carry, and letting each arm nominate its own
+  would change the denominator per arm and make the percentages incomparable.
+
+**Pass `--uem` once the hand-corrected subset defines its boundaries.** Without one,
+`pyannote.metrics` approximates the evaluation region as the union of reference and
+hypothesis extents, which scores an arm over stretches the reference never annotated. The
+script warns loudly rather than letting that pass silently.
+
+---
 
 ### What Stage 1 currently throws away
 
@@ -953,20 +1221,37 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 ├── README.md              # this file (committed)
 ├── .gitignore             # PHI, audio, transcripts, envs all excluded
 ├── scripts/               # pipeline code (Stage 0–4)
-│   ├── setup_envs.sh          # builds the asr_env conda prefix env
+│   ├── setup_envs.sh          # builds all four conda prefix envs, each with a smoke-check
 │   ├── standardize.sh         # Stage 0: one .m4a path in -> 16 kHz mono WAV in data/
 │   ├── stage_models.sh        # login-node staging of all offline model assets
 │   ├── warm_align_cache.py    # fetches the torchaudio alignment bundle into TORCH_HOME
-│   ├── run_whisperx.py        # Stage 1 entry point: ASR -> align -> diarize -> render
+│   ├── run_whisperx.py        # single-job Stage 1: ASR -> align -> diarize -> render
+│   ├── run_asr.py             # Stage 1a: ASR -> align -> <stem>.aligned.json
+│   ├── rttm_io.py             # RTTM read/write; imported from ALL FOUR envs, stdlib only
+│   ├── diarize_pyannote.py    # Stage 1b baseline arm  -> <stem>.community-1.rttm
+│   ├── diarize_diarizen.py    # Stage 1b arm A         -> <stem>.diarizen[-free].rttm
+│   ├── diarize_sortformer.py  # Stage 1b arms B and C  -> <stem>.sortformer[-streaming].rttm
+│   ├── join_speakers.py       # Stage 1c: aligned JSON + one RTTM -> one arm's two artifacts
+│   ├── check_split_regression.py  # gate: does 1a+1b+1c reproduce the pre-split fixture?
+│   ├── compare_arms.py        # word-level diff across every arm (CPU, no model)
+│   ├── score_arms.py          # DER + therapy measures vs a reference (diar_eval_env)
 │   ├── render_transcript.py   # .diarized.json -> readable .txt (CPU; also standalone)
 │   ├── audit_speakers.py      # QC: bucket unlabeled words by cause (in progress)
 │   └── gpu_smoke.py           # GPU/ctranslate2 sanity check
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
-│   ├── stage1_whisperx.sbatch # Stage 1 job — clone this for new GPU jobs
+│   ├── run_bakeoff.sh                    # submits the whole 1a -> 1b×N -> 1c chain
+│   ├── stage1a_asr.sbatch                # 1 GPU
+│   ├── stage1b_pyannote.sbatch           # 1 GPU, asr_env
+│   ├── stage1b_diarizen.sbatch           # 1 GPU, diarizen_env, speaker count pinned
+│   ├── stage1b_diarizen_free.sbatch      # 1 GPU, diarizen_env, shipped config
+│   ├── stage1b_sortformer.sbatch         # 1 GPU, nemo_env, offline + windowed
+│   ├── stage1b_sortformer_streaming.sbatch  # 1 GPU, nemo_env
+│   ├── stage1c_join.sbatch               # NO GPU — join + render every arm, then the gate
+│   ├── stage1_whisperx.sbatch # single-job Stage 1 — clone this for new GPU jobs
 │   └── gpu_smoke.sbatch       # original GPU/ctranslate2 sanity job
 └── data/                  # raw + derived data — GITIGNORED (PHI)
     ├── inbox/                 # exactly one .wav — the file Stage 1 will process
-    └── stage1/                # Stage 1 output: <stem>.diarized.json + <stem>.transcript.txt
+    └── stage1/                # Stage 1 output, one set per arm (see the artifact table above)
 ```
 
 Planned additions, in the order the roadmap above builds them (nothing here exists yet):
