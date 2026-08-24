@@ -1,5 +1,10 @@
 # PSYCH-ASR: Psychotherapy Session ASR, Diarization & Outcome-Linked NLP
 
+> **AI assistants: read [`AI_INSTRUCTIONS.md`](./AI_INSTRUCTIONS.md) in full before doing
+> anything.** It is the operating contract for this repository and it is model-agnostic —
+> Claude, Codex, DeepSeek/open-code, Cursor, a local model, all the same. Nothing auto-loads
+> it, so read it the moment you are pointed at this README.
+
 Feasibility pipeline for **automated transcription and NLP-based characterization of
 early psychotherapy sessions**, with the goal of predicting treatment response and
 estimating therapist fidelity from what is actually said in the room.
