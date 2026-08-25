@@ -30,6 +30,13 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   exit 1
 }
 
+# A clone has to opt into tracked hooks once. Do it here rather than making
+# anyone remember, so the attribution stripper is on from the first commit.
+if [ -d "$ROOT/.githooks" ] && [ -z "$(git config core.hooksPath || true)" ]; then
+  git config core.hooksPath .githooks
+  echo "enabled .githooks for this clone"
+fi
+
 git add -A || { echo "git add failed"; exit 1; }
 
 if git diff --cached --quiet; then
