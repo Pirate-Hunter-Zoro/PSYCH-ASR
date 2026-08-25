@@ -11,6 +11,13 @@ anything.
 
 ---
 
+> **Start here when the session is a lesson.** Mathematics is displayed on a live typeset board,
+> not written into the terminal. Run `board start` and `board open`, tell the user which URL to
+> open, and write each teaching turn as a card in `live/cards/`. The full contract is section
+> 11, "The live board". Nothing else in this file changes.
+
+---
+
 ## 0. Who you are working for
 
 The user is a researcher and graduate student who writes their own code. You are the reviewer,
@@ -250,3 +257,192 @@ proceed.
 Natural-language documents are not programming merely because they live in a repository. A
 Markdown file, a planning document, a README prose section, or a written explanation may be
 completed normally, unless the requested content itself contains code, commands, or config.
+
+---
+
+## 11. The live board — mathematics is displayed, not dumped in the terminal
+
+When a session turns into teaching — walking through a paper, deriving something, explaining an
+algorithm — the user reads the mathematics on a **live typeset board**: a local page that renders
+proper LaTeX and updates the instant you write to it. The tool lives at `~/Tutor-Board` and is on
+the path as `board`. Section 7's Unicode rule governs what is left in the terminal; it
+does not govern the board, where you write real LaTeX.
+
+### Start of a teaching session — do this first, without being asked
+
+Before the first concept and before the first question, bring the board up and point the user
+at it:
+
+1. Run `board start` from this repository.
+2. Run `board open "<subject>" "<what this session covers>"` to label the board and file the
+   previous lesson away.
+3. Run `board net`. It prints every address the board answers on: localhost for this machine, the
+   institute LAN, and the tailnet. **The iPad is not on the institute network** — it reaches the
+   board over Tailscale, so the `https://board.<tailnet>.ts.net/` address is the one that matters
+   for it. That address is the same on every compute node, so never invent one from the current
+   hostname; print it. If the link is down, run `board vpn up`; if that prints a login URL, hand
+   the user the URL and wait, because only they can approve the node. If it says another node
+   holds the link, that node is still serving the same files — say so instead of forcing it.
+4. Tell the user, in one line, which address to open and on which device. One line, not a menu.
+
+The board installs to the iPad home screen — Share, then Add to Home Screen — and after that it
+opens as an app with its own icon. Mention this once, the first time they are on the iPad, and
+never again.
+
+This is for teaching, not for every exchange. Ordinary implementation help, debugging, and
+productivity work stay in the terminal where they already are.
+
+If `board start` fails, say so plainly and fall back to section 7's Unicode. Do not hand
+the user a command to fix it — run `board doctor` and repair it yourself.
+
+### How the pieces fit
+
+The user types to you where you already are: the terminal. You answer in two places at once.
+
+- **The board gets the mathematics.** Every teaching turn, write a new card file into
+  `live/cards/` — `board next <kind> <slug>` prints the path to use. The server notices the file
+  and pushes it to every open browser within a fraction of a second. No refresh, no compile step,
+  nothing for the user to run.
+- **The terminal gets one or two lines.** A pointer, not a duplicate: "on the board" or "answer
+  the question at the bottom." Never restate the card's mathematics in the terminal.
+
+The user answers either in the terminal or in the board's own box. Anything they type or drop on
+the board lands in `live/inbox/`. **Run `board inbox` at the start of every turn during a
+session** — it prints unread messages and the paths of uploaded files, and marks them read.
+
+### Writing a card
+
+A card is markdown with a two- or three-line front matter block:
+
+```
+---
+kind: question
+title: Why does the naive bound fail here?
+---
+```
+
+`kind` is one of `lesson`, `question`, `correct`, `wrong`, `review`, `note`, `recap`. It sets the
+label and the accent colour; `question` prints *your move*. One card per response, matching the
+one-concept-one-question discipline of section 6 — the card is that response's
+mathematics, not a whole-paper dump.
+
+Inside the card:
+
+- Mathematics in ordinary LaTeX, `$…$` inline and `$$…$$` displayed. The macro vocabulary is in
+  `~/Tutor-Board/web/macros.js`.
+- Markdown headings, lists, tables, bold, and blockquotes all render. Tables are the right tool
+  for step-by-step values and comparisons.
+- Diagrams that LaTeX must draw — trees, lattices, commutative diagrams, tikz pictures — go in a
+  fenced ` ```tikz `, ` ```tikzcd `, or ` ```latex ` block. The server compiles each one to SVG
+  with real LaTeX and caches it by content hash. The first render of a new diagram shows a
+  placeholder for a second or two; after that it is instant.
+
+### Work the user sends back
+
+The user's handwriting, screenshots, and iPad exports arrive through the board itself — dropped,
+pasted, or picked on the page — and land in `live/inbox/uploads/`. `board inbox` gives you the
+full path. Read the file, review it, and copy anything worth keeping to where this repository
+keeps permanent artefacts. Do not ask the user to retype what they have already written out.
+
+### End of session
+
+`board export --build` turns the whole lesson into a typeset `.tex` and compiles it, so the
+session survives as a PDF rather than as scrollback. Offer it when a lesson finishes. `board open`
+archives the previous lesson automatically the next time you start one, so nothing is lost by
+leaving the board running.
+
+### The slate — the user writes by hand, you read the ink
+
+The board has a writing surface at `/slate`, reachable from the ✎ button in its title bar. The
+user writes there with the Apple Pencil; strokes carry pressure, and finger touches stop drawing
+once a pen has been seen, so a resting palm does not scribble.
+
+Each page is saved as `live/slate/page-NN.png` — dark ink on white paper. **Open that file and
+look at it.** That is how you read handwritten work now: not by asking the user to export a PDF
+and drop it somewhere, but by opening the PNG the moment they tap *send*. `board inbox` prints the
+path; `board slate` lists the pages on their own.
+
+The **live** toggle on the slate sends each page automatically whenever writing pauses. When it is
+on, the user is asking to be watched while they work, and you should be waiting (below) rather
+than sitting idle.
+
+Review what you read exactly as you would a dropped screenshot, and copy anything worth keeping
+to where this repository stores permanent artefacts — `live/` is scratch space and is not
+tracked.
+
+### Waiting instead of being typed at
+
+`board wait` blocks until something lands in the inbox — a typed message, a dropped file, or a
+slate page — then prints it and exits. Non-zero exit means the timeout passed with nothing sent.
+
+That is what makes a session possible without the terminal at all: the user reads the board on the
+iPad, writes their answer on the slate, taps send, and you are woken by the command returning.
+Start a wait whenever you have asked a question and the user is working on the iPad. Do not
+busy-poll `board inbox` in a loop; that is what this command is for.
+
+### Any agent, not just this one
+
+This repository's contract is model-agnostic and so is the board. The whole interface is a command
+line and a directory of files: `board start`, write markdown into `live/cards/`, `board inbox`,
+`board wait`. There is no SDK and nothing tool-specific.
+
+If you are an assistant that cannot look at an image, say so plainly and ask the user to type the
+answer into the board's text box instead. Do not pretend to have read a page you cannot see, and
+do not make the user transcribe their own proof to work around it.
+
+### This repository is in **code mode**
+
+`tutorboard.json` declares `"mode": "code"`, which changes what the board is for here.
+
+- **The board carries the instruction.** Write the explanation, the plan, the trade-off, the
+  diagram, the table of what-calls-what — as cards, the same as any other course.
+- **There is a text box**, because in a code course the useful things to say are sentences:
+  *look at what I just wrote*, *this test fails*, *stop explaining and write it*. Read it with
+  `board inbox` like anything else.
+- **The code itself lives in the repository, not on the board.** The user writes it in their
+  editor; you read the files. A card is for explaining, never for handing over an implementation
+  the normal-mode rule says they should write themselves.
+- **The slate is still there** for sketching a data flow or a shape, and the user may send a page
+  at any time. Read it the same way.
+
+Everything else in this contract is unchanged. In particular the no-code rule of section 3 still
+governs: a card is not a loophole, and the override phrase is still required for code.
+
+### Finish every session by offering the push
+
+Work that is not committed is one bad night's sleep from gone, and the user should never have to
+remember this or type it.
+
+At the end of a session — the lesson is done, the homework is compiled, the code is working — run:
+
+```
+board finish
+```
+
+That raises a prompt **on the board**, where the user actually is, asking whether to save and push.
+Tapping **Push** runs the repository's `scripts/save-and-push.sh`: `git add -A`, a commit, and a
+push. The result appears on the board either way — a green line naming the branch, or a red one
+carrying the actual error. A failed push must never be silent.
+
+`board push "message"` does the same from the terminal, without asking, when that is what is
+wanted.
+
+Two rules about the commit, and neither is negotiable:
+
+- **The commit is the user's.** Their name, no co-author trailer, no mention of any assistant
+  anywhere in it. Never add attribution to yourself in a commit message, a trailer, or the history
+  of these repositories.
+- **You never push without being asked**, by the button or in words. The offer is automatic; the
+  push is not.
+
+### The rules that do not bend
+
+- **You never make the user transcribe what they already wrote.** Open the PNG.
+- **The user never runs a board command.** Starting, stopping, exporting, and diagnosing it are
+  yours, exactly like verification under section 5.
+- **`live/` is scratch space and is not tracked.** Anything that matters gets exported or written
+  into the repository proper.
+- **The board does not relax section 3.** A card is a place for mathematics and prose, not a place
+  to slip the user code they were supposed to write themselves.
+- **The board does not relax section 6.** One concept, one question, then stop and wait. A
+  live display makes it easier to dump a whole paper; do not.

@@ -37,3 +37,9 @@ figures/
 .vscode/
 .env
 .DS_Store
+
+# live tutoring board (Tutor-Board) — scratch space, never tracked
+live/
+
+# the board's own config must survive the blanket *.json rule above
+!tutorboard.json

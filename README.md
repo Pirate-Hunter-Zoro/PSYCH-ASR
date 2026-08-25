@@ -1284,3 +1284,26 @@ top of this README); the former `writeup/` directory was relocated there.
   search query is an exfiltration event under this constraint, not a bug.
 - Raw and derived data live under `data/` (gitignored) or on study storage — never in the
   tracked tree.
+
+## The live board
+
+Lessons are not read in the terminal. The assistant runs `board start` from this repository and
+tells you which address to open. This machine gets a `127.0.0.1` one; the iPad, which is not on
+the institute network, reaches the same board over **Tailscale**. All of them show the same page
+at the same time.
+
+On the iPad, open it once in Safari and use Share → **Add to Home Screen**. After that it is an
+app with its own icon, no browser chrome, and a long-press shortcut straight to the slate.
+
+Everything the assistant teaches appears there as typeset mathematics the moment it is written:
+real LaTeX, real subgroup lattices and commutative diagrams, no refresh and no compile step. You
+answer in the terminal, in the box at the bottom of the board, or by hand: the ✎ button opens a
+slate you write on with the Apple Pencil. Tap send and the assistant opens the page and reads
+your handwriting — no exporting, no airdropping, no retyping a proof you already wrote. Turn on
+*live* and it sees each page as you pause. Photos and PDFs dropped anywhere on the board work
+too.
+
+With the board on the iPad and the slate for your working, a whole session can happen without
+touching the keyboard.
+
+You never run a board command. The tool is `~/Tutor-Board`; its README explains the rest.
