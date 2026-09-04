@@ -718,7 +718,7 @@ about, since Whisper decodes in float16 on a GPU and is not bit-reproducible acr
 
 ### Bake-off status — first full run, 2026-08-23
 
-All five arms ran end to end on the first pilot session (`<stem>`, ~50 min), off one
+All five arms ran end to end on the first pilot session (~50 min), off one
 Stage 1a transcript: 489 aligned segments, 7,298 words. The 1a/1b/1c split reproduced the
 pre-split fixture from job 2032471 **byte-identically** — same segments, words, turns,
 speaker labels, unlabeled counts and talk-time shares — so the refactor is behavior-preserving
@@ -812,6 +812,32 @@ Four measures per arm:
 `pyannote.metrics` approximates the evaluation region as the union of reference and
 hypothesis extents, which scores an arm over stretches the reference never annotated. The
 script warns loudly rather than letting that pass silently.
+
+### Getting a reference when the assistant cannot read the session
+
+The assistant working on this repository is fenced out of every session artifact by a
+`PreToolUse` hook — see *Privacy & Data Handling* below for what it refuses and what it
+deliberately leaves open. That is a design input for the bake-off rather than an obstacle to
+it, and it has one architectural consequence worth stating here: **every artifact that
+carries session content needs a numbers-only sibling.** `compare_arms.py` currently writes a
+single file that embeds verbatim disputed spans with surrounding context, so the guard blocks
+it whole — and with it the region count, the region durations, and the per-arm labels, none
+of which is content. The writer should split: the full artifact stays exactly as it is and
+stays blocked, and a summary sibling carries counts, durations, the agreement matrix and one
+record per disagreement region with no words in it. The same rule applies to anything built
+for the reference pass.
+
+Four routes to a ground metric are planned, and only one of them scores the arms. In order of
+when they can run: calibrating this scorer against **injected errors of known size** (no
+audio, no reference, and it should happen first, because scoring an arm against itself proves
+only the identity case); a **synthetic two-speaker mixture** with the reference written by the
+mixer, swept across overlap fraction, which supplies the axis session 1 cannot test without
+waiting on the collaborator's recording; **reference-free stability** — each arm scored
+against its own re-run under a perturbation that must not change the answer, and against the
+consensus of the other arms; and the **hand-corrected reference**, which remains the only
+thing that decides the bake-off. The full plan, including which sampling decisions stay with
+the human and why, is `Research-Journey/planning/PSYCH-ASR_TODO.txt`, section *Ground truth
+without reading the data*.
 
 ---
 
@@ -1282,6 +1308,15 @@ top of this README); the former `writeup/` directory was relocated there.
   configuration exist to keep that true. Any model or agent that reads transcripts must have
   no tool-calling surface at all: a tool-enabled agent placing a session fragment into a
   search query is an exfiltration event under this constraint, not a bug.
+- **The assistant is fenced out of the data by a hook, not by a promise.** A `PreToolUse`
+  guard (`libr-local-llm/config/block-phi.py`) refuses every read of the diarization and ASR
+  output shapes, of anything under `data/`, and of the arm-comparison script — which prints
+  disputed transcript spans to stdout, so running it counts as a read. Left open on purpose,
+  because refusing more would make the assistant useless on the bake-off: `*.arm_scores.json`
+  (metrics, no text), `slurm_jobs/logs/**` (counts and durations), every pipeline script and
+  every job that runs one, and `ls`/`find`/`stat` against the artifacts. Filenames and sizes
+  are not content. The rationale, the traps, and the rebuild procedure are in
+  `libr-local-llm/PERMISSIONS.md`.
 - Raw and derived data live under `data/` (gitignored) or on study storage — never in the
   tracked tree.
 
