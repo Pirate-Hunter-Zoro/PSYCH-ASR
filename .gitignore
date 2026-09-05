@@ -28,9 +28,14 @@ __pycache__/
 .pytest_cache/
 logs/
 slurm_jobs/**/logs/
-scratch/
-artifacts/
-figures/
+# ANCHORED TO THE REPO ROOT with a leading slash, all four of them. Unanchored,
+# `artifacts/` matches at ANY depth -- and it silently swallowed the whole
+# psych_asr/artifacts/ subpackage, which `git add -A` then reported as nothing to
+# do. A source directory disappearing from a commit because an output directory
+# shares its name is exactly the failure a leading slash prevents.
+/scratch/
+/artifacts/
+/figures/
 
 # ---- Editor / OS / secrets ----
 .claude/

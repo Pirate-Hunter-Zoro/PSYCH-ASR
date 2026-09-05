@@ -9,7 +9,8 @@
 #SBATCH -e slurm_jobs/logs/stage1b_diarizen_err.txt
 #SBATCH --gres=gpu:1
 
-# Stage 1b, ARM A: DiariZen (WavLM + Conformer EEND, powerset over 4 speakers) -> RTTM.
+# Stage 1b, ARM A: DiariZen (WavLM + Conformer EEND, powerset over 4 speakers) -> RTTM,
+# with the speaker count PINNED to 2. The unpinned twin is stage1b_diarizen_free.sbatch.
 # WEIGHTS ARE CC BY-NC 4.0. Fine for feasibility research; not shippable.
 #
 # Runs in diarizen_env, NOT asr_env: DiariZen pins torch 2.1.1 against asr_env's locked
@@ -23,27 +24,13 @@
 # Submit FROM THE REPO ROOT.
 
 set -e
+source slurm_jobs/lib/job_env.sh
 
-CONDA_ENV=/media/studies/ehr_study/analysis/mferguson/venvs/diarizen_env
 INPUT_DIR=data/inbox
 
-module purge
-module load Anaconda3/2025.06-0
-eval "$(conda shell.bash hook)"
+activate_env diarizen_env
+report_gpu
 
-set +u; conda activate "${CONDA_ENV}"; set -u || exit 10
-export PYTHONNOUSERSITE=1
-export HF_HUB_OFFLINE=1
-export TORCH_HOME="/media/studies/ehr_study/analysis/mferguson/models/torch_home"
-
-echo "Pinning to GPU ${CUDA_VISIBLE_DEVICES} on $(hostname)"
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv
-
-WAV_COUNT=$(ls "${INPUT_DIR}"/*.wav | wc -l)
-if [[ "${WAV_COUNT}" -ne 1 ]]; then
-    echo "Make sure ${INPUT_DIR} has exactly 1 .wav file in it"
-    exit 1
-fi
-AUDIO_PATH=$(ls "${INPUT_DIR}"/*.wav)
-echo "Diarizing $(basename "${AUDIO_PATH}") with DiariZen"
-python scripts/diarize_diarizen.py "${AUDIO_PATH}" --num-speakers 2
+AUDIO_PATH="$(sole_wav "${INPUT_DIR}")"
+echo "Diarizing $(basename "${AUDIO_PATH}") with DiariZen (pinned to 2 speakers)"
+python -m psych_asr.cli.diarize_diarizen "${AUDIO_PATH}" --num-speakers 2

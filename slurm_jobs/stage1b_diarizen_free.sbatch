@@ -18,40 +18,19 @@
 # cost of switching. Running both ways measures what that constraint is worth on this
 # audio instead of arguing about it.
 #
-# WEIGHTS ARE CC BY-NC 4.0. Fine for feasibility research; not shippable.
-#
-# Runs in diarizen_env, NOT asr_env: DiariZen pins torch 2.1.1 against asr_env's locked
-# 2.8.0, which is a hard conflict and the reason this arm is an environment fork.
-#
-# Wall time and memory are both raised over the baseline job. DiariZen slides a 16 s
-# window at a 0.1 step, so a 50 minute session becomes a few thousand overlapping chunks,
-# each of which is embedded and clustered -- far more forward passes than community-1's
-# pipeline makes, on host memory as well as GPU.
+# WEIGHTS ARE CC BY-NC 4.0. Same env and same resource reasoning as the pinned arm --
+# see stage1b_diarizen.sbatch.
 #
 # Submit FROM THE REPO ROOT.
 
 set -e
+source slurm_jobs/lib/job_env.sh
 
-CONDA_ENV=/media/studies/ehr_study/analysis/mferguson/venvs/diarizen_env
 INPUT_DIR=data/inbox
 
-module purge
-module load Anaconda3/2025.06-0
-eval "$(conda shell.bash hook)"
+activate_env diarizen_env
+report_gpu
 
-set +u; conda activate "${CONDA_ENV}"; set -u || exit 10
-export PYTHONNOUSERSITE=1
-export HF_HUB_OFFLINE=1
-export TORCH_HOME="/media/studies/ehr_study/analysis/mferguson/models/torch_home"
-
-echo "Pinning to GPU ${CUDA_VISIBLE_DEVICES} on $(hostname)"
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv
-
-WAV_COUNT=$(ls "${INPUT_DIR}"/*.wav | wc -l)
-if [[ "${WAV_COUNT}" -ne 1 ]]; then
-    echo "Make sure ${INPUT_DIR} has exactly 1 .wav file in it"
-    exit 1
-fi
-AUDIO_PATH=$(ls "${INPUT_DIR}"/*.wav)
-echo "Diarizing $(basename "${AUDIO_PATH}") with DiariZen"
-python scripts/diarize_diarizen.py "${AUDIO_PATH}" --num-speakers 0
+AUDIO_PATH="$(sole_wav "${INPUT_DIR}")"
+echo "Diarizing $(basename "${AUDIO_PATH}") with DiariZen (shipped config, not pinned)"
+python -m psych_asr.cli.diarize_diarizen "${AUDIO_PATH}" --num-speakers 0

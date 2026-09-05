@@ -27,7 +27,7 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > the story"; this project's live task list is `~/Research-Journey/planning/PSYCH-ASR_TODO.txt`.
 >
 > **Conceptual walkthrough of Stage 1.** A slide deck explaining what
-> `scripts/run_whisperx.py` actually does — a broad tour of what each of the five calls
+> `psych_asr.cli.run_whisperx` actually does — a broad tour of what each of the five calls
 > accomplishes, with the input and output stated at every step, a pipeline diagram of how the
 > waveform and the words flow between the three models, and the traps worth knowing (loose
 > Whisper timestamps, why alignment must precede diarization, unlabelled words) — lives at
@@ -133,7 +133,7 @@ project on this box:
 - **Modules:** `module load Anaconda3/2025.06-0`.
 - **Env:** one conda *prefix* env, `asr_env` (Python 3.11), under
   `/media/studies/ehr_study/analysis/mferguson/venvs/`, built by
-  `scripts/setup_envs.sh` (not committed here).
+  `scripts/setup_envs.sh`.
 - **GPUs:** request them with `#SBATCH --gres=gpu:N`. The cluster runs
   `task/cgroup` with `ConstrainDevices=yes`, so a job sees only its allocated
   devices and Slurm sets `CUDA_VISIBLE_DEVICES` itself. Jobs log an `nvidia-smi`
@@ -206,16 +206,18 @@ three fields substitutes in with no change to whisperx and no change to the join
 
 So the interchange format is **RTTM**, and Stage 1 splits at that seam:
 
-| Step | Script | Env | In | Out |
+| Step | Entry point | Env | In | Out |
 | --- | --- | --- | --- | --- |
-| 1a ASR + alignment | `run_asr.py` | `asr_env`, GPU | one 16 kHz WAV | `<stem>.aligned.json` — no speaker keys |
-| 1b diarize | `diarize_pyannote.py` / `diarize_diarizen.py` / `diarize_sortformer.py` | per-model env, GPU | the same WAV | `<stem>.<arm>.rttm` |
-| 1c join + render | `join_speakers.py` | `asr_env`, CPU | aligned JSON + one RTTM | `<stem>.<arm>.diarized.json` + `<stem>.<arm>.transcript.txt` |
+| 1a ASR + alignment | `psych_asr.cli.run_asr` | `asr_env`, GPU | one 16 kHz WAV | `<stem>.aligned.json` — no speaker keys |
+| 1b diarize | `psych_asr.cli.diarize_pyannote` / `…diarize_diarizen` / `…diarize_sortformer` | per-model env, GPU | the same WAV | `<stem>.<arm>.rttm` |
+| 1c join + render | `psych_asr.cli.join_speakers` | `asr_env`, CPU | aligned JSON + one RTTM | `<stem>.<arm>.diarized.json` + `<stem>.<arm>.transcript.txt` |
 
-`scripts/rttm_io.py` is the shared reader/writer. It is imported from **all four** envs,
-whose torch and numpy pins are mutually incompatible, so it imports nothing at module scope
-beyond the standard library — `pandas` is imported inside the one function that returns the
-DataFrame shape `assign_word_speakers` wants.
+`psych_asr/artifacts/rttm_io.py` is the shared reader/writer. It is imported from **all
+four** envs, whose torch and numpy pins are mutually incompatible, so it imports nothing at
+module scope beyond the standard library — `pandas` is imported inside the one function
+that returns the DataFrame shape `assign_word_speakers` wants. The same discipline governs
+the whole `psych_asr.artifacts` subpackage and every `__init__.py` in the package, none of
+which re-export anything; see **Package layout** below.
 
 **The arm name is carried in every filename from 1b onward.** Which transcript came from
 which diarizer is a property of the file, not of a note somewhere — and 1c derives the arm
@@ -274,17 +276,15 @@ One-time setup:
 2. **Accept the gate.** While logged in as the token's account, open the model page
    and click *"Agree and access repository."* community-1 is auto-gated, so access is
    granted instantly (no manual approval).
-3. **Download into `models/`.** With `asr_env` active, from the repo root:
-
-   ```bash
-   set -a; source .env; set +a        # export HF_TOKEN for this shell
-   hf download pyannote/speaker-diarization-community-1 \
-     --local-dir /media/studies/ehr_study/analysis/mferguson/models/pyannote-speaker-diarization-community-1
-   ```
-
-   Do **not** set `HF_HUB_OFFLINE` for the download — only for the later load.
+3. **Download into `models/`.** `scripts/stage_models.sh` now stages community-1 along
+   with everything else, so this is one command on the login node rather than a manual
+   `hf download` that has to be remembered separately. It sources the git-ignored `.env`
+   with auto-export on, clears `HF_HUB_OFFLINE` for the download only, and pulls every
+   repo by `--local-dir`.
 4. **Load offline.** In pipeline code, set `HF_HUB_OFFLINE=1` and call
    `Pipeline.from_pretrained()` with the **absolute local directory**, never the Hub id.
+   `psych_asr/config.py` holds that directory and every other staged path, so no argument
+   parser spells one out.
 
 ### Diarization bake-off — candidate models
 
@@ -360,11 +360,12 @@ them.
 
 The same download recipe stages any other Hugging Face model: one
 `hf download ... --local-dir models/<name>` on the login node, then load by path.
-`stage_models.sh` now also pulls the three bake-off challengers this way
-(`diarizen-wavlm-large-s80-md-v2`, `diar_sortformer_4spk-v1`,
-`diar_streaming_sortformer_4spk-v2.1`) plus the WeSpeaker embedder DiariZen needs — about
-1.8 GB in total, which is small enough that the staging step is not the slow part of
-anything.
+`stage_models.sh` stages every asset the pipeline needs in one pass: the ASR weights,
+community-1, the three bake-off challengers (`diarizen-wavlm-large-s80-md-v2`,
+`diar_sortformer_4spk-v1`, `diar_streaming_sortformer_4spk-v2.1`), the WeSpeaker embedder
+DiariZen needs, and then the two caches that are *not* Hugging Face assets — the torchaudio
+alignment bundle and nltk's `punkt_tab`. The challengers come to about 1.8 GB, which is
+small enough that staging is not the slow part of anything.
 
 **How each challenger reaches its weights offline**, since all three differ from the
 `Pipeline.from_pretrained(<dir>)` pattern community-1 uses:
@@ -378,7 +379,7 @@ anything.
 - **DiariZen** is the awkward one. `DiariZenPipeline.from_pretrained()` calls
   `snapshot_download` and `hf_hub_download` internally, so it wants either the network or a
   directory in Hugging Face *cache* layout — which is not the `--local-dir` layout
-  everything else here uses. `scripts/diarize_diarizen.py` sidesteps it by constructing the
+  everything else here uses. `psych_asr/diarize/diarizen_arm.py` sidesteps it by constructing the
   pipeline directly from two absolute paths, which is all `from_pretrained` does once its
   two downloads resolve: the model hub directory, and the WeSpeaker embedder's
   `pytorch_model.bin` as a plain file path.
@@ -399,7 +400,7 @@ alignment model to a **torchaudio** bundle (`WAV2VEC2_ASR_BASE_960H`), fetched f
 `HF_HUB_OFFLINE=1` therefore does *not* protect this path, and on a node without outbound
 internet it will stall exactly the way an unstaged Hub model does. That cache is warmed on
 the login node by `scripts/stage_models.sh`, which exports `TORCH_HOME` to
-`models/torch_home` on study storage and runs `scripts/warm_align_cache.py`; torch writes
+`models/torch_home` on study storage and runs `psych_asr.cli.warm_align_cache`; torch writes
 the 360 MB `wav2vec2_fairseq_base_ls960_asr_ls960.pth` into a `hub/checkpoints` subfolder
 of it, and a re-run reuses it silently. **Every job must export the same `TORCH_HOME`** —
 exporting the variable, not merely having the files on disk, is what makes torch reuse the
@@ -416,7 +417,11 @@ synthesizes a `PunktTokenizer` from them when that name is requested. The absenc
 
 **Three environment variables must be exported in every job**, not merely pointed at:
 `HF_HUB_OFFLINE=1`, `TORCH_HOME`, and `NLTK_DATA`. Each library reads its own variable to
-find its cache; having the files on study storage is necessary but not sufficient.
+find its cache; having the files on study storage is necessary but not sufficient. All
+three, plus `PYTHONNOUSERSITE`, are exported by `activate_env` in
+`slurm_jobs/lib/job_env.sh`, which every job sources — before that helper existed, four
+jobs exported three variables and two exported two, which is the kind of difference nobody
+notices until a job hangs on a node with no internet.
 
 ---
 
@@ -429,25 +434,33 @@ of a Python traceback (two files silently became a two-line path before the guar
 existed). `standardize.sh` writes its 16 kHz WAV beside the source recording; moving the
 one you want processed into the inbox is a deliberate manual step.
 
-Submit **from the repo root**. The job's log paths and its `scripts/run_whisperx.py`
-invocation are all relative and resolve against the submit directory.
+Submit **from the repo root**, and that is load-bearing rather than a convention: nothing
+in this repository is pip-installed into any env, so every step runs as `python -m
+psych_asr.cli.<name>` and it is the submit directory landing on `sys.path` that makes the
+import resolve. The job's log paths are relative to the same place.
 
-- `slurm_jobs/stage1_whisperx.sbatch` — 1 GPU, 2 h wall, 8 CPUs, 64 G. Loads
-  `Anaconda3/2025.06-0`, activates `asr_env` inside a `set +u` / `set -u` wrap, and
+- `slurm_jobs/stage1_whisperx.sbatch` — 1 GPU, 2 h wall, 8 CPUs, 64 G. Sources
+  `slurm_jobs/lib/job_env.sh` and calls `activate_env asr_env`, which loads
+  `Anaconda3/2025.06-0`, activates the prefix env inside a `set +u` / `set -u` wrap, and
   exports the four variables every job needs: `PYTHONNOUSERSITE`, `HF_HUB_OFFLINE`,
   `TORCH_HOME`, `NLTK_DATA`.
-- `scripts/run_whisperx.py` — takes the audio path positionally, plus `--outdir`
+- `psych_asr.cli.run_whisperx` — takes the audio path positionally, plus `--outdir`
   (default `data/stage1`), `--model-dir` (default the staged
   `faster-whisper-large-v3`), `--batch-size` (default 16), `--diarize-model-dir`
   (default the staged `pyannote-speaker-diarization-community-1`), and
-  `--num-speakers` (default 2).
-- `scripts/render_transcript.py` — the readable-transcript renderer. Imported and
-  called by `run_whisperx.py` as its last step, so the job emits both artifacts; also
-  runnable standalone on any existing `.diarized.json` (see **Readable transcript**
+  `--num-speakers` (default 2). Every model-path default now reads from
+  `psych_asr/config.py` rather than being spelled out in the parser.
+- `psych_asr/transcript/render.py` — the readable-transcript renderer, called as the job's
+  last step so it emits both artifacts. `psych_asr.cli.render_transcript` runs the same
+  renderer standalone against any existing `.diarized.json` (see **Readable transcript**
   below).
 
-> **The split now exists alongside this.** `run_whisperx.py` and its sbatch remain the
-> single-job path for one session against the incumbent diarizer, and they are unchanged.
+> **The split now exists alongside this.** `psych_asr.cli.run_whisperx` and its sbatch
+> remain the single-job path for one session against the incumbent diarizer. It is now
+> assembled from the *same* library functions the split's three steps call — the same
+> decode, the same pyannote call, the same join, the same renderer — so the two paths
+> cannot drift apart. That is the property the regression gate checks, and it is cheaper
+> to make true by construction than to keep checking.
 > The 1a/1b/1c chain described in **Running the diarization bake-off** below is what to use
 > for anything comparing diarizers, and it is the path that will absorb new arms. The four
 > passes below are the same four passes; the split only moves where each one runs.
@@ -525,7 +538,7 @@ A fourth case hides from a naive count entirely: a segment that fails alignment 
 duration) is appended with an empty `words` list, so its words never exist to be counted as
 missing. Segment count and word count are both silently short.
 
-`scripts/audit_speakers.py` is the diagnostic that separates these — it buckets every
+`psych_asr.cli.audit_speakers` is the diagnostic that separates these — it buckets every
 unlabeled word by cause and cross-tabs it against whether the parent *segment* got a
 speaker, which distinguishes micro-gaps between turns (unlabeled words scattered inside
 labelled segments) from a genuinely uncovered stretch of audio. Cause 3 cannot be confirmed
@@ -535,7 +548,7 @@ from `.diarized.json` alone; it needs the turn table, which is why persisting th
 ### Readable transcript
 
 The `.diarized.json` is the machine artifact; nobody can read indented JSON with a
-`words` list on every segment against playing audio. `scripts/render_transcript.py`
+`words` list on every segment against playing audio. `psych_asr/transcript/render.py`
 renders the same content as a play script and writes
 `data/stage1/<stem>.transcript.txt`. `run_whisperx.py` calls it as its final step (CPU
 only, sub-second, no models), so a single Stage 1 job produces both files. It also runs
@@ -619,6 +632,7 @@ That submits the whole chain as one dependency graph and prints the job ids:
 ```text
 1a ASR + align  ──┬─> 1b community-1          (asr_env,      GPU)  ──┐
                   ├─> 1b diarizen             (diarizen_env, GPU)  ──┤
+                  ├─> 1b diarizen-free        (diarizen_env, GPU)  ──┤
                   ├─> 1b sortformer           (nemo_env,     GPU)  ──┼─> 1c join + render
                   └─> 1b sortformer-streaming (nemo_env,     GPU)  ──┘   (asr_env, CPU)
 ```
@@ -635,6 +649,12 @@ four-GPU node the arms themselves need.
 
 Individual jobs run standalone too (`sbatch slurm_jobs/stage1b_diarizen.sbatch`), which is
 how to re-run one arm without paying for the rest.
+
+**Adding a sixth arm is two edits and nothing else**: a `.sbatch` cloned from an existing
+one, and its name appended to the `ARM_JOBS` array at the top of `run_bakeoff.sh`. Stage 1c
+walks whatever RTTMs exist and takes each arm's name from the RTTM's own filename, the join
+and the renderer are shared by every arm, and `compare_arms` discovers arms by glob — so
+none of them knows how many there are.
 
 ### Artifacts, and which model produced which
 
@@ -655,7 +675,7 @@ difference rather than reconstructed from turn intersections.
 
 ### The regression gate
 
-The 1c job ends by running `scripts/check_split_regression.py`, comparing the baseline arm's
+The 1c job ends by running `psych_asr.cli.check_split_regression`, comparing the baseline arm's
 output through the split against the pre-split fixture from job 2032471. It reports two
 levels separately: **structure** (segment/word/turn counts, speaker labels, unlabeled counts,
 talk-time shares), where a mismatch means the refactor changed behavior and is a bug; and
@@ -765,7 +785,7 @@ transmitted. Confirm that line is still present in the log if NeMo is ever upgra
 
 ### Comparing the arms — do the mechanical diff first
 
-`scripts/compare_arms.py` (CPU, `asr_env`, no models) exploits the fact the split was built
+`psych_asr.cli.compare_arms` (CPU, `asr_env`, no models) exploits the fact the split was built
 for: because 1a ran once, every arm sits on the **identical word sequence with identical word
 timings**, so the only thing that can differ between two arms is the speaker label on each
 word. Comparing four 50-minute transcripts is therefore not a reading task — it is an exact
@@ -782,7 +802,7 @@ Agreement between arms is **not accuracy**: four arms can agree and all be wrong
 produces is the map of *where* they disagree, which is what makes the human listening pass
 affordable. The hand-corrected reference RTTM from Stage 2 is what actually scores the arms.
 
-### Scoring the arms — `scripts/score_arms.py`
+### Scoring the arms — `psych_asr.cli.score_arms`
 
 Run from `diar_eval_env`. **It cannot produce a real number until the reference exists**: the
 hand-corrected RTTM from Stage 2's stratified subset, which is the bake-off's test set and is
@@ -1250,26 +1270,43 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 ```bash
 .
 ├── README.md              # this file (committed)
+├── AI_INSTRUCTIONS.md     # the operating contract for any AI working here
 ├── .gitignore             # PHI, audio, transcripts, envs all excluded
-├── scripts/               # pipeline code (Stage 0–4)
-│   ├── setup_envs.sh          # builds all four conda prefix envs, each with a smoke-check
-│   ├── standardize.sh         # Stage 0: one .m4a path in -> 16 kHz mono WAV in data/
-│   ├── stage_models.sh        # login-node staging of all offline model assets
-│   ├── warm_align_cache.py    # fetches the torchaudio alignment bundle into TORCH_HOME
-│   ├── run_whisperx.py        # single-job Stage 1: ASR -> align -> diarize -> render
-│   ├── run_asr.py             # Stage 1a: ASR -> align -> <stem>.aligned.json
-│   ├── rttm_io.py             # RTTM read/write; imported from ALL FOUR envs, stdlib only
-│   ├── diarize_pyannote.py    # Stage 1b baseline arm  -> <stem>.community-1.rttm
-│   ├── diarize_diarizen.py    # Stage 1b arm A         -> <stem>.diarizen[-free].rttm
-│   ├── diarize_sortformer.py  # Stage 1b arms B and C  -> <stem>.sortformer[-streaming].rttm
-│   ├── join_speakers.py       # Stage 1c: aligned JSON + one RTTM -> one arm's two artifacts
-│   ├── check_split_regression.py  # gate: does 1a+1b+1c reproduce the pre-split fixture?
-│   ├── compare_arms.py        # word-level diff across every arm (CPU, no model)
-│   ├── score_arms.py          # DER + therapy measures vs a reference (diar_eval_env)
-│   ├── render_transcript.py   # .diarized.json -> readable .txt (CPU; also standalone)
-│   ├── audit_speakers.py      # QC: bucket unlabeled words by cause (in progress)
-│   └── gpu_smoke.py           # GPU/ctranslate2 sanity check
+├── psych_asr/             # the pipeline package — every entry point runs from here
+│   ├── config.py              # staged model paths, artifact dirs, arm names (stdlib only)
+│   ├── join.py                # Stage 1c: RTTM or Annotation -> speaker-stamped transcript
+│   ├── artifacts/             # on-disk shapes. STDLIB ONLY — all four envs import these
+│   │   ├── rttm_io.py             # RTTM read/write + turn-table diagnostics
+│   │   ├── naming.py              # <stem>.<arm>.<kind>, parsed and built in one place
+│   │   └── transcripts.py         # load/save, relink_word_segments, tolerant readers
+│   ├── transcript/            # turn grouping, the talk-time table, the readable render
+│   │   ├── turns.py               # collapse consecutive same-speaker segments
+│   │   ├── summary.py             # talk-time shares + the header every job prints
+│   │   └── render.py              # .diarized.json -> the play-script .txt
+│   ├── asr/align.py           # Stage 1a: Whisper decode + wav2vec2 forced alignment
+│   ├── diarize/               # Stage 1b, one module per arm + the shared stitcher
+│   │   ├── pyannote_arm.py        # baseline; keeps the exclusive (overlap-free) view
+│   │   ├── diarizen_arm.py        # arm A; the AHC pin and the sentinel-cluster warning
+│   │   ├── sortformer_arm.py      # arms B and C; .nemo restore, streaming preset
+│   │   └── windowing.py           # arm B's window stitcher (numpy/scipy, no model)
+│   ├── evaluate/              # comparing arms without a reference, and scoring with one
+│   │   ├── labels.py              # aligning arbitrary speaker names across systems
+│   │   ├── compare.py             # the word-level cross-arm diff
+│   │   ├── regression.py          # the 1a/1b/1c behaviour-preservation gate
+│   │   └── score.py               # DER + the two therapy measures (diar_eval_env)
+│   └── cli/                   # one module per job step; argparse and printing only
+│       ├── run_asr.py             ├── join_speakers.py    ├── score_arms.py
+│       ├── run_whisperx.py        ├── render_transcript.py├── gpu_smoke.py
+│       ├── diarize_pyannote.py    ├── compare_arms.py     ├── warm_align_cache.py
+│       ├── diarize_diarizen.py    ├── check_split_regression.py
+│       └── diarize_sortformer.py  └── audit_speakers.py   (stub — see Stage 2)
+├── scripts/               # shell only; everything Python lives in the package
+│   ├── setup_envs.sh          # builds all four conda prefix envs, each smoke-checked
+│   ├── standardize.sh         # Stage 0: one recording in -> 16 kHz mono WAV beside it
+│   ├── stage_models.sh        # login-node staging of every offline model asset
+│   └── save-and-push.sh       # commit + push, invoked by the board's push button
 ├── slurm_jobs/            # .sbatch job scripts; logs/ gitignored
+│   ├── lib/job_env.sh                    # activate_env / report_gpu / sole_wav
 │   ├── run_bakeoff.sh                    # submits the whole 1a -> 1b×N -> 1c chain
 │   ├── stage1a_asr.sbatch                # 1 GPU
 │   ├── stage1b_pyannote.sbatch           # 1 GPU, asr_env
@@ -1277,20 +1314,74 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 │   ├── stage1b_diarizen_free.sbatch      # 1 GPU, diarizen_env, shipped config
 │   ├── stage1b_sortformer.sbatch         # 1 GPU, nemo_env, offline + windowed
 │   ├── stage1b_sortformer_streaming.sbatch  # 1 GPU, nemo_env
-│   ├── stage1c_join.sbatch               # NO GPU — join + render every arm, then the gate
+│   ├── stage1c_join.sbatch               # NO GPU — join, render, gate, cross-arm diff
 │   ├── stage1_whisperx.sbatch # single-job Stage 1 — clone this for new GPU jobs
-│   └── gpu_smoke.sbatch       # original GPU/ctranslate2 sanity job
+│   └── gpu_smoke.sbatch       # GPU/ctranslate2 sanity job
+├── tests/                 # pytest over SYNTHETIC transcripts and turn tables — no PHI
 └── data/                  # raw + derived data — GITIGNORED (PHI)
     ├── inbox/                 # exactly one .wav — the file Stage 1 will process
     └── stage1/                # Stage 1 output, one set per arm (see the artifact table above)
 ```
 
+### Package layout — the two rules that shape it
+
+**Nothing is pip-installed, and every entry point is `python -m psych_asr.cli.<name>` run
+from the repo root.** A `pip install -e .` into four envs would mean four reinstalls after
+every code change, and it would make the package's dependency metadata a fifth thing to
+keep consistent with four incompatible pin sets. Running from the repo root costs nothing
+and is already the rule every job followed.
+
+**No `__init__.py` re-exports anything.** They hold a docstring and no imports at all. This
+is the env contract expressed as an import graph: the package is imported from four envs
+whose torch, numpy and transformers pins are mutually incompatible, so a convenience
+re-export at any level would make importing *any* module drag in *every* module's
+third-party dependencies — and `diar_eval_env`, which is deliberately torch-free, would
+lose the ability to read an RTTM. Callers name the module they want in full, and each
+module declares only what it actually needs. Which env a module belongs to is then readable
+straight off its import block.
+
+The layers, from the bottom:
+
+| Layer | Imports | Runs in |
+| --- | --- | --- |
+| `config`, `artifacts/*`, `transcript/*`, `evaluate/compare`, `evaluate/regression`, `evaluate/labels` | standard library only | all four envs |
+| `diarize/windowing` | numpy, scipy | any env with numpy |
+| `asr/align`, `join`, `diarize/pyannote_arm` | whisperx, pyannote.audio | `asr_env` |
+| `diarize/diarizen_arm` | DiariZen + its vendored fork | `diarizen_env` |
+| `diarize/sortformer_arm` | NeMo | `nemo_env` |
+| `evaluate/score` | pyannote.metrics, no torch | `diar_eval_env` |
+| `cli/*` | whichever of the above its step needs | per step |
+
+Every `cli` module is argument parsing, path handling and printing, and nothing else. The
+work lives in the library modules and is reachable without a parser, which is what makes it
+testable at all.
+
+### Tests
+
+`tests/` is pytest over **synthetic** transcripts and turn tables — every fixture is
+generated in the test that uses it, so there is no session content anywhere in the suite
+and it runs without the cluster. Run it from the repo root:
+
+```bash
+python -m pytest tests -q
+```
+
+64 tests in `asr_env`; the four that need `whisperx` skip themselves elsewhere, so the same
+suite runs in torch-free `diar_eval_env` and covers the scorer's pure logic there.
+
+What it deliberately does **not** cover is anything that needs a model. Whisper's decode,
+pyannote's clustering, DiariZen's VBx and Sortformer's forward pass are exercised only by
+an actual Slurm run, and the artifact that proves the pipeline still behaves is the
+regression gate in `psych_asr/evaluate/regression.py`, which `stage1c_join.sbatch` runs
+against the job-2032471 fixture on every bake-off. Unit tests check the glue; the gate
+checks the pipeline.
+
 Planned additions, in the order the roadmap above builds them (nothing here exists yet):
-a per-session speaker turn table written beside the Stage 1 JSON; `scripts/` modules for
-structural features (Stage 3a), the openSMILE acoustic pass and the non-speech-gap event
-classifier (Stage 3b), and the vLLM turn-coding driver plus its judgment-cache merge
-(Stage 3c), each with an sbatch cloned from `stage1_whisperx.sbatch`; and a `models/`
-staging extension covering the audio-event and dimensional-affect checkpoints.
+`psych_asr/features/` for the structural features (Stage 3a), the openSMILE acoustic pass
+and the non-speech-gap event classifier (Stage 3b), and the vLLM turn-coding driver plus
+its judgment-cache merge (Stage 3c), each with an sbatch cloned from
+`stage1_whisperx.sbatch`; and a `stage_models.sh` extension covering the audio-event and
+dimensional-affect checkpoints.
 
 The plain-language narrative and this project's task list now live in the
 sibling `~/Research-Journey` repo (see the **Companion documentation** note at the
@@ -1308,15 +1399,23 @@ top of this README); the former `writeup/` directory was relocated there.
   configuration exist to keep that true. Any model or agent that reads transcripts must have
   no tool-calling surface at all: a tool-enabled agent placing a session fragment into a
   search query is an exfiltration event under this constraint, not a bug.
-- **The assistant is fenced out of the data by a hook, not by a promise.** A `PreToolUse`
-  guard (`libr-local-llm/config/block-phi.py`) refuses every read of the diarization and ASR
-  output shapes, of anything under `data/`, and of the arm-comparison script — which prints
-  disputed transcript spans to stdout, so running it counts as a read. Left open on purpose,
-  because refusing more would make the assistant useless on the bake-off: `*.arm_scores.json`
-  (metrics, no text), `slurm_jobs/logs/**` (counts and durations), every pipeline script and
-  every job that runs one, and `ls`/`find`/`stat` against the artifacts. Filenames and sizes
-  are not content. The rationale, the traps, and the rebuild procedure are in
-  `libr-local-llm/PERMISSIONS.md`.
+- **The rule is written down, and separately it is enforced.** `AI_INSTRUCTIONS.md` opens
+  with **The data fence**, which binds any assistant working here whether or not anything
+  stops it. Underneath that, a `PreToolUse` guard (`~/claude-config/hooks/block-phi.py`)
+  refuses every read of the raw audio, the diarization and ASR output shapes, anything under
+  `data/`, and any invocation of `psych_asr.cli.compare_arms` — which prints disputed
+  transcript spans to stdout, so running it counts as a read. Left open on purpose, because
+  refusing more would make the assistant useless on the bake-off: `*.arm_scores.json`
+  (metrics, no text), `slurm_jobs/logs/**` (counts and durations), every pipeline entry
+  point and every job that runs one, and `ls`/`find`/`stat` against the artifacts.
+  Filenames and sizes are not content.
+- **The fence turns on where inference runs, not on which model it is.** A hosted assistant
+  reading a transcript has transmitted a therapy session to a third party. A model whose
+  weights execute on LIBR compute, with no tool-calling surface, is inside the fence, and
+  reading session content is its *job* — the reference pass, turn coding, adjudicating where
+  the diarizers disagree. The full three-part test is in `AI_INSTRUCTIONS.md`. An
+  open-weight model served over somebody else's API is outside it; the licence is irrelevant
+  and the network path is what counts.
 - Raw and derived data live under `data/` (gitignored) or on study storage — never in the
   tracked tree.
 

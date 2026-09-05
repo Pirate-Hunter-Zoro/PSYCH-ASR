@@ -2,7 +2,9 @@
 
 **Any AI assistant working in this repository must read this file first and adopt it wholesale.**
 This file is model-agnostic. Claude Code, Codex, DeepSeek/open-code, Cursor, Copilot, a local
-model — the contract is identical.
+model — the contract is identical, with exactly one clause that turns on where your inference
+runs rather than on who you are. That clause is **The data fence**, immediately below, and it
+is the first thing to read.
 
 There are no tool-specific variants of this file. `README.md` is the entry point for what this
 project *is*; this file is the contract for *how you behave in it*. Nothing auto-loads either
@@ -15,6 +17,79 @@ anything.
 > not written into the terminal. Run `board start` and `board open`, tell the user which URL to
 > open, and write each teaching turn as a card in `live/cards/`. The full contract is section
 > 11, "The live board". Nothing else in this file changes.
+
+---
+
+## The data fence — before anything else
+
+**Do not read anything under `data/`.** Not the audio, not the transcripts, not the turn
+tables, not the joined JSON, not the arm comparison. Every one of them is derived from
+identifiable therapy-session recordings, and the participant code is in the filename.
+
+Concretely, refuse to open any of these, wherever they live and however they are named:
+
+- anything under `data/` — `data/inbox/`, `data/stage1/`, and any tree added later
+- `.wav`, `.m4a`, `.mp3`, `.flac`, `.mp4`, `.mov` — the recordings themselves
+- `.rttm`, `.aligned.json`, `.diarized.json`, `.transcript.txt`, `.arm_comparison.json`
+- and do not run `psych_asr.cli.compare_arms`, which prints verbatim disputed transcript
+  spans to stdout. Running it is a read.
+
+"Read" includes anything that puts the bytes in front of you: `cat`, `head`, `grep -r` over
+the directory, a Python one-liner that opens a file and prints it, a subagent you send to
+look. Laundering the read through a tool does not change what it is.
+
+### What is deliberately left open, because refusing more would make you useless
+
+- **Filenames, sizes and timestamps.** `ls`, `find`, `stat` against the artifacts. A
+  filename is metadata; it is how you tell which arms landed and which job died.
+- **`slurm_jobs/logs/**`.** Counts, durations, talk-time shares, tracebacks. Numbers, not
+  content.
+- **`*.arm_scores.json`.** DER and the therapy measures. Metrics, no transcript text. It
+  sits inside `data/` and is readable on purpose.
+- **Every line of source in this repository**, and running any pipeline stage over its own
+  inputs. A stage writes to disk rather than to you, which is the whole reason the fence
+  can be this tight without stopping the work.
+
+### The exception: a model whose inference runs on this hardware
+
+This rule is not about who you are. It is about **where the bytes go.** A hosted assistant
+that reads a transcript has transmitted a therapy session to a third party — that is the
+exfiltration event the on-prem constraint exists to prevent, and it is why the fence is
+drawn at *reading* rather than at *sending*.
+
+A model whose weights execute on LIBR compute is inside the fence, and reading session
+content is **its job, not a violation** — the reference pass, the turn coding, adjudicating
+where the diarizers disagree. None of that is possible from outside, and none of it is work
+this repository intends to do any other way.
+
+You are inside the fence only if **all three** hold:
+
+1. **Your weights execute on this hardware.** The forward pass happens on a LIBR node.
+   Nothing you read crosses the network to reach you and nothing you emit crosses it to
+   leave. A model that happens to be open-weight but is being served to you over somebody
+   else's API is **outside** — the licence is irrelevant, the network path is what counts.
+2. **You have no tool-calling surface at all.** No web fetch, no search, no shell that can
+   open a socket, no MCP server, no subagent with any of those. A tool-enabled model
+   placing a session fragment into a search query is an exfiltration event under this
+   constraint, not a bug, and it is why the clinical path is a plain Python client rather
+   than a coding agent.
+3. **You were pointed at the data deliberately**, by the user or by a pipeline stage in this
+   repository that is supposed to read it. Wandering into `data/` because it was there does
+   not qualify.
+
+The question to ask yourself is never "am I a local model?" It is **"if I open this file,
+does what I read stay on this node?"** If you cannot answer yes with certainty, the answer
+is no and the fence applies to you. Uncertainty resolves to refusal.
+
+### The fence is a control, not a promise
+
+For assistants that run under a hook, a `PreToolUse` guard
+(`~/claude-config/hooks/block-phi.py`) refuses the reads above before the tool runs, and
+its behaviour is covered by a case table in that repository. **The hook is not the rule.**
+An assistant working here without that hook is bound by this section exactly as much, and
+"nothing stopped me" is not a defence. Equally, do not go looking for ways around the hook:
+a guard you route around is a guard you have decided does not apply to you, which is the
+one judgement you do not get to make here.
 
 ---
 

@@ -9,37 +9,23 @@
 #SBATCH -e slurm_jobs/logs/stage1_whisperx_err.txt
 #SBATCH --gres=gpu:1
 
-# Exit immediately if command fails
+# SINGLE-JOB Stage 1: ASR -> align -> diarize -> join -> render, in one process against
+# the incumbent diarizer. Use the 1a/1b/1c chain (run_bakeoff.sh) for anything comparing
+# diarizers; this is the path for one session with no dependency graph to submit, and it
+# is the shape that produced the regression fixture.
+#
+# Clone this file for a new single-step GPU job.
+#
+# Submit FROM THE REPO ROOT.
+
 set -e
+source slurm_jobs/lib/job_env.sh
 
-# ---- Conda configuration ----
-CONDA_ENV=/media/studies/ehr_study/analysis/mferguson/venvs/asr_env
-
-# ---- Input directory ----
 INPUT_DIR=data/inbox
 
-# ---- Boilerplate env/bootstrap ----
-module purge
-module load Anaconda3/2025.06-0
-eval "$(conda shell.bash hook)"
+activate_env asr_env
+report_gpu
 
-# Conda often dislikes 'set -u'—use this safe pattern:
-set +u; conda activate "${CONDA_ENV}"; set -u || exit 10
-export PYTHONNOUSERSITE=1
-export HF_HUB_OFFLINE=1
-export TORCH_HOME="/media/studies/ehr_study/analysis/mferguson/models/torch_home"
-export NLTK_DATA="/media/studies/ehr_study/analysis/mferguson/models/nltk_data"
-
-echo "Pinning to GPU ${CUDA_VISIBLE_DEVICES} on $(hostname)"
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv
-
-# Count the number of .wav files in the input directory (wc returns lines, words, and bytes, so specify lines only)
-WAV_COUNT=$(ls "${INPUT_DIR}"/*.wav | wc -l)
-if [[ "${WAV_COUNT}" -ne 1 ]]; then
-    echo "Make sure ${INPUT_DIR} has exactly 1 .wav file in it"
-    exit 1
-fi
-AUDIO_PATH=$(ls "${INPUT_DIR}"/*.wav)
-AUDIO_NAME=$(basename "${AUDIO_PATH}")
-echo "Processing ${AUDIO_NAME}"
-python scripts/run_whisperx.py "${AUDIO_PATH}"
+AUDIO_PATH="$(sole_wav "${INPUT_DIR}")"
+echo "Processing $(basename "${AUDIO_PATH}")"
+python -m psych_asr.cli.run_whisperx "${AUDIO_PATH}"

@@ -9,26 +9,18 @@
 #SBATCH -e slurm_jobs/logs/gpu_smoke_err.txt
 #SBATCH --gres=gpu:1
 
-# Exit immediately if command fails
+# Does the GPU / torch / ctranslate2 stack work at all? Transcribes a synthesized sine
+# tone with faster-whisper-TINY, so it needs no session audio and no real weights.
+#
+# Submit FROM THE REPO ROOT.
+
 set -e
+source slurm_jobs/lib/job_env.sh
 
-# ---- Conda configuration ----
-CONDA_ENV=/media/studies/ehr_study/analysis/mferguson/venvs/asr_env
+activate_env asr_env
+report_gpu
 
-# ---- Boilerplate env/bootstrap ----
-module purge
-module load Anaconda3/2025.06-0
-eval "$(conda shell.bash hook)"
-
-# Conda often dislikes 'set -u'—use this safe pattern:
-set +u; conda activate "${CONDA_ENV}"; set -u || exit 10
-export PYTHONNOUSERSITE=1
-export HF_HUB_OFFLINE=1
-
-echo "Pinning to GPU ${CUDA_VISIBLE_DEVICES} on $(hostname)"
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv
-
-TONE_WAV="/tmp/gpu_smoke.wav"
-ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 -ar 16000 -ac 1 -loglevel error $TONE_WAV
-
-python scripts/gpu_smoke.py $TONE_WAV
+TONE_WAV="${TMPDIR:-/tmp}/gpu_smoke.wav"
+ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 -ar 16000 -ac 1 -loglevel error "${TONE_WAV}"
+python -m psych_asr.cli.gpu_smoke "${TONE_WAV}"
+rm -f "${TONE_WAV}"

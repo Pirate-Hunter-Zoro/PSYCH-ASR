@@ -10,10 +10,9 @@ RTTM is the carrier because it is simultaneously the standard diarization interc
 format AND what DER scorers consume, so the file the bake-off scores and the file the join
 reads are the same artifact. No second serialization to keep in sync.
 
-This module is imported from FOUR different conda envs (asr_env, diarizen_env, nemo_env,
-diar_eval_env) whose torch and numpy pins are mutually incompatible. It therefore imports
-nothing at module scope beyond the standard library; pandas is imported inside the one
-function that needs it.
+STDLIB ONLY AT MODULE SCOPE. This module is imported from all four conda envs, whose torch
+and numpy pins are mutually incompatible; pandas is imported inside the one function that
+returns the DataFrame shape.
 
 RTTM line format, ten space-separated fields:
 
@@ -118,7 +117,7 @@ def read_rttm_as_dataframe(rttm_path):
     DiarizationPipeline also produces are never read, so they are not reconstructed here.
 
     pandas is imported inside the function on purpose -- this module is shared across envs
-    and diar_eval_env should stay able to import it without a DataFrame library loading.
+    and diar_eval_env should stay able to read an RTTM without a DataFrame library loading.
     """
     import pandas as pd
 
