@@ -325,10 +325,22 @@ candidate without that restriction. Record which arm wins *and* whether it can b
 
 **Why these three challengers.** Both Sortformer variants and DiariZen model overlapping
 speech directly — Sortformer frame-level and multi-label, DiariZen powerset over up to four
-concurrent speakers — where community-1's configuration sets `embedding_exclude_overlap`,
-protecting its speaker profiles by discarding the overlapped regions rather than resolving
-them. Therapist backchannels over patient speech are constant in this corpus and are
-themselves a Stage 3a feature, so how a diarizer treats overlap is not a side issue.
+concurrent speakers — where community-1's configuration sets `embedding_exclude_overlap`.
+Note what that setting does and does not do: community-1 still *emits* overlapping turns (the
+segmentation is powerset-based, and 10.9 s of overlap is exactly what it reported), but the
+overlapped stretches are withheld from the speaker-embedding step so a profile is never
+computed from two voices at once. Overlap therefore never contributes to its who-is-who
+decision.
+
+**How much overlap this corpus actually has is unmeasured, and the one number we have is a
+floor rather than an estimate.** An earlier version of this section asserted that therapist
+backchannels over patient speech are "constant" in this corpus. That was a premise, not a
+measurement, and session 1 does not support it as stated: the incumbent reported 10.9 s of
+overlap in a 50-minute session, 0.5% of covered speech. But Stage 2's corrected reference then
+found **47 utterances the incumbent never heard at all**, most of them two words long. How
+many of those were spoken over the other person is not yet known — so the honest reading is
+that 10.9 s bounds what community-1 *detected*, not what happened, and settling the difference
+is one of the things the arm comparison is for.
 
 **Published DER numbers across these projects are not comparable and must not be tabled
 together.** DiariZen reports at collar 0 s; the NVIDIA CALLHOME figures use the conventional
