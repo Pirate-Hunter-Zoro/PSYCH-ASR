@@ -26,13 +26,23 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > both this project and the sibling `TRD-EHR` project. Start there for "where are we / what's
 > the story"; this project's live task list is `~/Research-Journey/planning/PSYCH-ASR_TODO.txt`.
 >
-> **Conceptual walkthrough of Stage 1.** A slide deck explaining what
-> `psych_asr.cli.run_whisperx` actually does — a broad tour of what each of the five calls
-> accomplishes, with the input and output stated at every step, a pipeline diagram of how the
-> waveform and the words flow between the three models, and the traps worth knowing (loose
-> Whisper timestamps, why alignment must precede diarization, unlabelled words) — lives at
+> **Conceptual walkthrough of Stage 1.** A slide deck explaining what Stage 1 actually does
+> — a broad tour of what each of the five calls accomplishes, with the input and output
+> stated at every step, a pipeline diagram of how the waveform and the words flow between the
+> three models, and the traps worth knowing (loose Whisper timestamps, why alignment must
+> precede diarization, unlabelled words) — lives at
 > `~/Research-Journey/psych-asr-feasibility/stage1_pipeline_walkthrough.pdf`, built from the
-> `.tex` beside it. Read it before modifying Stage 1.
+> `.tex` beside it. Read it before modifying Stage 1. It was written against the single-job
+> script that has since been retired; the five calls it walks through are unchanged and now
+> run as `psych_asr.cli.run_asr`, `psych_asr.cli.diarize_pyannote` and
+> `psych_asr.cli.join_speakers`.
+>
+> **Everything after that deck has its own.** `stage2_reference_walkthrough.pdf`, in the same
+> directory, is the sequel: the five-diarizer bake-off and what one session could and could not
+> settle about it, what DER is and why published numbers cannot be tabled together, the read
+> guard as a design input, and the hand-corrected reference built from a human's 117 logged
+> errors — ending in the next steps. It carries real aggregate results and no session content.
+> It is the fastest way to see where the project actually stands.
 >
 > **Division of labour between the two files.** The TODO tracks **only what is left**.
 > Finished work is never annotated there as "DONE" — its entry is deleted, and whatever
@@ -439,34 +449,26 @@ in this repository is pip-installed into any env, so every step runs as `python 
 psych_asr.cli.<name>` and it is the submit directory landing on `sys.path` that makes the
 import resolve. The job's log paths are relative to the same place.
 
-- `slurm_jobs/stage1_whisperx.sbatch` — 1 GPU, 2 h wall, 8 CPUs, 64 G. Sources
-  `slurm_jobs/lib/job_env.sh` and calls `activate_env asr_env`, which loads
-  `Anaconda3/2025.06-0`, activates the prefix env inside a `set +u` / `set -u` wrap, and
-  exports the four variables every job needs: `PYTHONNOUSERSITE`, `HF_HUB_OFFLINE`,
-  `TORCH_HOME`, `NLTK_DATA`.
-- `psych_asr.cli.run_whisperx` — takes the audio path positionally, plus `--outdir`
-  (default `data/stage1`), `--model-dir` (default the staged
-  `faster-whisper-large-v3`), `--batch-size` (default 16), `--diarize-model-dir`
-  (default the staged `pyannote-speaker-diarization-community-1`), and
-  `--num-speakers` (default 2). Every model-path default now reads from
-  `psych_asr/config.py` rather than being spelled out in the parser.
-- `psych_asr/transcript/render.py` — the readable-transcript renderer, called as the job's
-  last step so it emits both artifacts. `psych_asr.cli.render_transcript` runs the same
-  renderer standalone against any existing `.diarized.json` (see **Readable transcript**
-  below).
+**There is one Stage 1 path, and it is the 1a/1b/1c chain.** `bash
+slurm_jobs/run_bakeoff.sh` submits it — see **Running the diarization bake-off** below for
+the dependency graph, the per-arm jobs and the artifact names. Every job sources
+`slurm_jobs/lib/job_env.sh` and calls `activate_env`, which loads `Anaconda3/2025.06-0`,
+activates the prefix env inside a `set +u` / `set -u` wrap, and exports the four variables
+every job needs: `PYTHONNOUSERSITE`, `HF_HUB_OFFLINE`, `TORCH_HOME`, `NLTK_DATA`.
 
-> **The split now exists alongside this.** `psych_asr.cli.run_whisperx` and its sbatch
-> remain the single-job path for one session against the incumbent diarizer. It is now
-> assembled from the *same* library functions the split's three steps call — the same
-> decode, the same pyannote call, the same join, the same renderer — so the two paths
-> cannot drift apart. That is the property the regression gate checks, and it is cheaper
-> to make true by construction than to keep checking.
-> The 1a/1b/1c chain described in **Running the diarization bake-off** below is what to use
-> for anything comparing diarizers, and it is the path that will absorb new arms. The four
-> passes below are the same four passes; the split only moves where each one runs.
+> **The single-job script is retired** (2026-09-09). `psych_asr.cli.run_whisperx` and
+> `slurm_jobs/stage1_whisperx.sbatch` ran all three passes in one job, and were kept for a
+> while as the cheap path for one session against the incumbent diarizer. Both are deleted.
+> Two things settled it. That path never persisted the pyannote turn table, so anything it
+> produced was missing the one artifact overlapping speech survives in. And a second path
+> that has to be kept behaviour-identical to the chain is a standing cost with no remaining
+> benefit, because the chain runs one arm as happily as five. What was worth keeping from it
+> is kept: the regression gate still scores the chain against the pre-split fixture that
+> path produced.
 
-The script decodes the audio **once** with `whisperx.load_audio` and reuses that array
-for all three passes, so ffmpeg runs a single time:
+The three passes below are what Stage 1 does, wherever they run. Stage 1a decodes the audio
+with `whisperx.load_audio` and reuses that array for both of its own passes, so ffmpeg runs
+once per job:
 
 1. **ASR.** Loads the Whisper model by **absolute local path** with `local_files_only`,
    `float16`, and language forced to English (skipping per-chunk detection), then
@@ -495,11 +497,13 @@ session has exactly two people in it, so constraining the count removes both fai
 modes for free. The flag exists rather than a hardcoded 2 in case a session turns out to
 have a third person present.
 
-**Output:** two files per session — `data/stage1/<stem>.diarized.json` (the machine
-artifact, described next) and `data/stage1/<stem>.transcript.txt` (the human reading
-copy, see **Readable transcript** below).
+**Output:** one pair per session per arm — `<stem>.<arm>.diarized.json` (the machine
+artifact, described next) and `<stem>.<arm>.transcript.txt` (the human reading copy, see
+**Readable transcript** below), both under `data/stage1/`. The un-armed
+`<stem>.diarized.json` beside them is the pre-split fixture the regression gate scores
+against; nothing that still runs writes that name.
 
-`<stem>.diarized.json` is a dict of `segments`, `word_segments`,
+`<stem>.<arm>.diarized.json` is a dict of `segments`, `word_segments`,
 and `language`. Each segment carries `start`, `end`, `text`, `avg_logprob`, a `words`
 list, and a `speaker` label; each word carries `start`, `end`, `score`, and `speaker`.
 That `avg_logprob` is the per-segment confidence Stage 2's quality triage runs on. As a
@@ -538,21 +542,22 @@ A fourth case hides from a naive count entirely: a segment that fails alignment 
 duration) is appended with an empty `words` list, so its words never exist to be counted as
 missing. Segment count and word count are both silently short.
 
-`psych_asr.cli.audit_speakers` is the diagnostic that separates these — it buckets every
-unlabeled word by cause and cross-tabs it against whether the parent *segment* got a
-speaker, which distinguishes micro-gaps between turns (unlabeled words scattered inside
-labelled segments) from a genuinely uncovered stretch of audio. Cause 3 cannot be confirmed
-from `.diarized.json` alone; it needs the turn table, which is why persisting that table
-(see *What Stage 1 currently throws away*) gates finishing the audit.
+**The diagnostic that would separate these was never built, and is no longer planned**
+(2026-09-09). `psych_asr.cli.audit_speakers` existed as a complete argument parser over an
+unimplemented body; it is deleted. What settles it is a number: the baseline arm leaves
+**5 of 7,298 words** unlabeled on the full session. However those five split across the
+three causes, they are a rounding error on every feature downstream, and the causes stay
+written down above for whoever needs them if a later session comes back with hundreds
+instead of five. A stub is a promise; deleting it is how you stop making one.
 
 ### Readable transcript
 
 The `.diarized.json` is the machine artifact; nobody can read indented JSON with a
 `words` list on every segment against playing audio. `psych_asr/transcript/render.py`
 renders the same content as a play script and writes
-`data/stage1/<stem>.transcript.txt`. `run_whisperx.py` calls it as its final step (CPU
-only, sub-second, no models), so a single Stage 1 job produces both files. It also runs
-standalone — give it a `.diarized.json` path and optionally `--outdir` (default: beside
+`data/stage1/<stem>.<arm>.transcript.txt`. `psych_asr.cli.join_speakers` calls it as its
+final step (CPU only, sub-second, no models), so the 1c job emits both files for every arm.
+It also runs standalone — give it a `.diarized.json` path and optionally `--outdir` (default: beside
 the input) — which is how to re-render after any change to the format without paying for
 another GPU job.
 
@@ -861,32 +866,25 @@ without reading the data*.
 
 ---
 
-### What Stage 1 currently throws away
+### What Stage 1 still throws away
 
-Three signals exist inside the run and are discarded before anything is written. All three
-are cheap to keep, and each one is load-bearing for a later stage, so they are the first
-planned change to `run_whisperx.py`.
+**The turn table is kept now, and so is the overlap-free view of it.** Stage 1b writes
+`<stem>.<arm>.rttm` for every arm, and the baseline additionally writes
+`<stem>.<arm>.exclusive.rttm` from pyannote 4.x's `exclusive_speaker_diarization`, so
+overlap is a set difference rather than something reconstructed from turn intersections.
+That is what unblocked the interruption/overlap family of Stage 3a features — overlap
+duration, interruption counts, turn-taking latency, who yields. None of them is computable
+from `.diarized.json` alone, because `assign_word_speakers` resolves each word by
+intersection-duration argmax against the turns, so a word spoken over another speaker gets
+exactly one label and the fact of the overlap vanishes. Retiring the single-job path closed
+the last hole in this: it was the one caller left that dropped the DataFrame on the floor.
 
-**The pyannote turn table.** `DiarizationPipeline` returns a DataFrame with one row per
-speaker turn — `start`, `end`, `speaker` — which is handed to `assign_word_speakers` and
-then dropped on the floor. That table is the *only* place overlapping speech survives.
-pyannote's segmentation model is powerset-based and genuinely emits concurrent turns, but
-`assign_word_speakers` resolves each word by intersection-duration argmax against the
-turns, so a word spoken over another speaker gets exactly one label and the fact of the
-overlap vanishes. Everything in the interruption/overlap family of Stage 3a features —
-overlap duration, interruption counts, turn-taking latency, who yields — is computable
-from the turn table and *not* computable from `.diarized.json`. It should be persisted
-per session as its own artifact alongside the JSON.
+Still discarded: `speaker_embeddings`, the third field on the `DiarizeOutput` that
+`DiarizationPipeline.__call__` throws away along with the wrapper object. Reaching it means
+calling the pyannote pipeline directly. Nothing downstream needs it yet; it is recorded here
+so that it is a choice rather than a rediscovery.
 
-Two further fields ride along on the same call and are discarded with it. pyannote 4.x
-returns a `DiarizeOutput` object carrying `speaker_diarization`,
-`exclusive_speaker_diarization`, and `speaker_embeddings`; WhisperX reads only the first
-(and the third when asked). The **exclusive** annotation is the same diarization with the
-per-frame speaker count clamped to one — an overlap-free view of the session. Having both
-gives overlap for free as a set difference, which is a cheaper and less error-prone way to
-locate simultaneous speech than reconstructing it from turn intersections. Reaching it means
-calling the pyannote pipeline directly rather than through `DiarizationPipeline.__call__`,
-which throws the wrapper object away and returns only a DataFrame.
+What follows is the part that is still genuinely thrown away.
 
 **Whisper's decode-quality metadata.** `.diarized.json` carries `avg_logprob` per segment
 and a wav2vec2 alignment `score` per word, and those are the two confidence channels
@@ -1139,8 +1137,8 @@ Two levers exist, at different stages, and they are not substitutes:
 
 - **Bias the decode (Stage 1).** `whisperx.load_model` accepts an `asr_options` dict, and the
   installed stack passes both `initial_prompt` and `hotwords` straight through to faster-whisper's
-  prompt construction. `run_whisperx.py:40` currently passes neither, so both sit at their `None`
-  defaults. Both end up in the same `sot_prev` region of the prompt — hotword tokens first, prior
+  prompt construction. `transcribe_and_align` in `psych_asr/asr/align.py` passes neither, so
+  both sit at their `None` defaults. Both end up in the same `sot_prev` region of the prompt — hotword tokens first, prior
   context after — and that region is capped at half the model's maximum prompt length, so the
   lexicon competes for a bounded budget and cannot simply be the whole formulary. `hotwords` is
   the better fit of the two here: it is meant for exactly this (a bare term list, no sentence
@@ -1405,7 +1403,7 @@ twice:
   sentence boundary is not a speaker boundary, and a sentence that two people built together
   has neither. `chunk_size`, `vad_onset` (0.500), and `vad_offset` (0.363) are all settable
   through the `vad_options` dict argument of `whisperx.load_model`; nothing in
-  `run_whisperx.py` passes it today, so all three sit at their defaults. Lowering
+  `psych_asr/asr/align.py` passes it today, so all three sit at their defaults. Lowering
   `chunk_size` cuts more often and costs Whisper decoding context — a real WER trade, which
   is why it is an experiment to run against the overlap recording rather than a default to
   change on argument.
@@ -1462,10 +1460,9 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 │   │   └── score.py               # DER + the two therapy measures (diar_eval_env)
 │   └── cli/                   # one module per job step; argparse and printing only
 │       ├── run_asr.py             ├── join_speakers.py    ├── score_arms.py
-│       ├── run_whisperx.py        ├── render_transcript.py├── gpu_smoke.py
-│       ├── diarize_pyannote.py    ├── compare_arms.py     ├── warm_align_cache.py
-│       ├── diarize_diarizen.py    ├── check_split_regression.py
-│       ├── diarize_sortformer.py  ├── audit_speakers.py   (stub — see Stage 2)
+│       ├── diarize_pyannote.py    ├── render_transcript.py├── gpu_smoke.py
+│       ├── diarize_diarizen.py    ├── compare_arms.py     ├── warm_align_cache.py
+│       ├── diarize_sortformer.py  ├── check_split_regression.py
 │       └── apply_corrections.py   # Stage 2: the error log -> the corrected reference
 ├── scripts/               # shell only; everything Python lives in the package
 │   ├── setup_envs.sh          # builds all four conda prefix envs, each smoke-checked
@@ -1482,8 +1479,7 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 │   ├── stage1b_sortformer.sbatch         # 1 GPU, nemo_env, offline + windowed
 │   ├── stage1b_sortformer_streaming.sbatch  # 1 GPU, nemo_env
 │   ├── stage1c_join.sbatch               # NO GPU — join, render, gate, cross-arm diff
-│   ├── stage1_whisperx.sbatch # single-job Stage 1 — clone this for new GPU jobs
-│   └── gpu_smoke.sbatch       # GPU/ctranslate2 sanity job
+│   └── gpu_smoke.sbatch                  # GPU/ctranslate2 sanity job
 ├── tests/                 # pytest over SYNTHETIC transcripts and turn tables — no PHI
 └── data/                  # raw + derived data — GITIGNORED (PHI)
     ├── inbox/                 # exactly one .wav — the file Stage 1 will process
@@ -1552,7 +1548,7 @@ Planned additions, in the order the roadmap above builds them (nothing here exis
 `psych_asr/features/` for the structural features (Stage 3a), the openSMILE acoustic pass
 and the non-speech-gap event classifier (Stage 3b), and the vLLM turn-coding driver plus
 its judgment-cache merge (Stage 3c), each with an sbatch cloned from
-`stage1_whisperx.sbatch`; and a `stage_models.sh` extension covering the audio-event and
+`stage1a_asr.sbatch`; and a `stage_models.sh` extension covering the audio-event and
 dimensional-affect checkpoints.
 
 The plain-language narrative and this project's task list now live in the
