@@ -38,11 +38,14 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > `psych_asr.cli.join_speakers`.
 >
 > **Everything after that deck has its own.** `stage2_reference_walkthrough.pdf`, in the same
-> directory, is the sequel: the five-diarizer bake-off and what one session could and could not
-> settle about it, what DER is and why published numbers cannot be tabled together, the read
-> guard as a design input, and the hand-corrected reference built from a human's 117 logged
-> errors — ending in the next steps. It carries real aggregate results and no session content.
-> It is the fastest way to see where the project actually stands.
+> directory, is the sequel — *Did the Computer Hear It Right?* — and it is written in
+> deliberately plain language: nothing is named before it is explained, Whisper and pyannote
+> are "the typist" and "the name-tagger" throughout, and the five arms are "contestants". It
+> covers the bake-off and why one session could not pick a winner, what the DER grade and its
+> collar actually are, why the read guard is a design input rather than an obstacle, and the
+> hand-corrected reference built from a human's 117 logged errors — ending in the next steps.
+> Real aggregate results, no session content. **It is the fastest way to see where the project
+> actually stands**, and the right thing to hand anyone who has not been in the code.
 >
 > **Division of labour between the two files.** The TODO tracks **only what is left**.
 > Finished work is never annotated there as "DONE" — its entry is deleted, and whatever
