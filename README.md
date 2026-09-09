@@ -39,16 +39,20 @@ support a grant application (R21, possibly R01) for processing the full set of s
 >
 > **Everything after that deck has its own.** `stage2_reference_walkthrough.pdf`, in the same
 > directory, is the sequel — *Did the Computer Hear It Right?* — and it is written in
-> deliberately plain language: nothing is named before it is explained, and the three Stage 1
+> deliberately plain language: nothing is named before it is used, and the three Stage 1
 > models are "the typist", "the stopwatch" and "the name-tagger" throughout. Rewritten
-> 2026-09-09 around four things: the pipeline diagram with **all three** boxes marked
-> swappable rather than one; what a human annotator recorded in her 117-row error log and why
-> two thirds of it is a verdict on diarization; **how those 117 rows plus the machine's
-> transcript rebuild into a corrected reference**, step by step; and the sweep that is now
-> planned, with one section per box explaining what is actually inside it — no black boxes,
-> read off the installed source. Counts only, no session content. **It is the fastest way to
-> see where the project actually stands**, and the right thing to hand anyone who has not
-> been in the code.
+> 2026-09-09 to 22 slides: the pipeline with **all three** boxes marked swappable rather than
+> one; what a human annotator recorded in her 117-row error log, and the single column
+> (`Add Turn?`) that splits it 75/42 into *the turns were wrong* versus *the words were
+> wrong*; **the correction algorithm as six worked examples**, each showing the literal
+> spreadsheet row, the turns before and the turns after; and the model grid now planned.
+> Counts only, no session content.
+>
+> **Two things about its form are deliberate and should survive edits.** It is written in the
+> present tense and never narrates what the project used to believe. And the algorithm is
+> taught *only* by example — an earlier prose walkthrough of the same material ran to fifteen
+> slides and did not land. **It is the fastest way to see where the project actually stands**,
+> and the right thing to hand anyone who has not been in the code.
 >
 > **Division of labour between the two files.** The TODO tracks **only what is left**.
 > Finished work is never annotated there as "DONE" — its entry is deleted, and whatever
