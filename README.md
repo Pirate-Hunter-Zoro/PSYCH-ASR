@@ -39,13 +39,16 @@ support a grant application (R21, possibly R01) for processing the full set of s
 >
 > **Everything after that deck has its own.** `stage2_reference_walkthrough.pdf`, in the same
 > directory, is the sequel — *Did the Computer Hear It Right?* — and it is written in
-> deliberately plain language: nothing is named before it is explained, Whisper and pyannote
-> are "the typist" and "the name-tagger" throughout, and the five arms are "contestants". It
-> covers the bake-off and why one session could not pick a winner, what the DER grade and its
-> collar actually are, why the read guard is a design input rather than an obstacle, and the
-> hand-corrected reference built from a human's 117 logged errors — ending in the next steps.
-> Real aggregate results, no session content. **It is the fastest way to see where the project
-> actually stands**, and the right thing to hand anyone who has not been in the code.
+> deliberately plain language: nothing is named before it is explained, and the three Stage 1
+> models are "the typist", "the stopwatch" and "the name-tagger" throughout. Rewritten
+> 2026-09-09 around four things: the pipeline diagram with **all three** boxes marked
+> swappable rather than one; what a human annotator recorded in her 117-row error log and why
+> two thirds of it is a verdict on diarization; **how those 117 rows plus the machine's
+> transcript rebuild into a corrected reference**, step by step; and the sweep that is now
+> planned, with one section per box explaining what is actually inside it — no black boxes,
+> read off the installed source. Counts only, no session content. **It is the fastest way to
+> see where the project actually stands**, and the right thing to hand anyone who has not
+> been in the code.
 >
 > **Division of labour between the two files.** The TODO tracks **only what is left**.
 > Finished work is never annotated there as "DONE" — its entry is deleted, and whatever
@@ -252,6 +255,51 @@ session) produced 489 segments, 7298 words, exactly 2 speaker labels, 89 turns, 
 segment, 79/21 talk time. Composing 1a → 1b(community-1) → 1c must reproduce those numbers
 exactly. If it does not, the split changed behavior and the difference is a bug, not a
 finding.
+
+### The other two boxes — the seam that has *not* been cut yet
+
+**Added 2026-09-09, and it reframes the bake-off.** Stage 1 runs three models, and the
+argument that produced the diarization bake-off applies word for word to the other two:
+
+| Box | Nickname | What runs today | Ever compared? |
+| --- | --- | --- | --- |
+| `transcribe` | the typist | `faster-whisper-large-v3` | **no** |
+| `align` | the stopwatch | torchaudio `wav2vec2_fairseq_base_ls960` | **no** |
+| `diarize` | the name-tagger | five arms | yes — undecided |
+
+Both untested boxes are running a **default, not a decision**: whisperx bundles a
+transcriber and resolves an aligner, and nobody chose either. The aligner is the more
+uncomfortable of the two — it is the *base* (small) model trained on **LibriSpeech, 960
+hours of people reading books aloud**. Spontaneous, disfluent, overlapped therapy speech is
+as far from read audiobooks as English gets, and the cost of that mismatch has never been
+measured.
+
+**What makes measuring it possible now** is the corrected reference below (*Stage 2 — the
+corrected reference*). Until a human's 117 corrections were applied, there was nothing in
+this project that could tell a transcript it was wrong.
+
+**The seam.** 1b splits cleanly because RTTM is a three-column contract any diarizer can
+emit. 1a has no equivalent: `psych_asr.cli.run_asr` does transcribe *and* align in one
+entry point, and `<stem>.aligned.json` is produced rather than accepted. Two consequences,
+and they differ in cost:
+
+- **Swapping the aligner is cheap** — `whisperx.load_align_model` already takes a model
+  name, so a different bundle is an argument, not a fork.
+- **Swapping the transcriber to a non-Whisper model is a fork.** Parakeet or Canary would
+  need their own 1a entry point emitting the identical `<stem>.aligned.json` contract, so
+  that 1c and the scorer cannot tell which typist ran. That is the RTTM seam again, done for
+  1a, and it should be cut *before* the second transcriber is added rather than after.
+  `nemo_env` already exists for the Sortformer arms, so no new environment is needed —
+  which is normally the expensive part.
+
+**The grid is nine jobs, not twenty.** The name-tagger never reads a word, so its output
+does not depend on which typist ran. Run each typist once and each diarizer once, then
+assemble the cells. A nested loop that re-runs diarization per transcript is wasted compute
+*and* re-introduces exactly the confound the 1a/1b split exists to remove.
+
+**One thing to check before staging any NVIDIA weights:** the licence. Three of the five
+diarizer arms are already non-commercial-only, against a stated R21/R01 deliverable. Record
+which model *wins* and, separately, which model can *ship*.
 
 ### Staging model weights (offline)
 
