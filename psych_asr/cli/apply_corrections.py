@@ -141,6 +141,9 @@ def format_report(stem, log_path, source_name, drift_note, corrections, summary,
         + (f"  (+{len(data['error_log_incomplete_rows'])} incomplete: rows "
            f"{data['error_log_incomplete_rows']})" if data["error_log_incomplete_rows"] else "")
         + f"  ({data['error_log_padding_rows']} padding rows below the table)",
+        f"Of those       : {data['rows_changing_turn_structure']} say the diarizer got the "
+        f"TURN STRUCTURE wrong (Add Turn?), "
+        f"{data['rows_changing_words_only']} only the words",
         f"Turns          : {data['turns_before']} -> {data['turns_after']}",
         f"Words          : {data['words_before']} -> {data['words_after']}",
         "",

@@ -678,8 +678,18 @@ def apply_corrections(transcript_turns, corrections, index):
         bucket = found.setdefault(correction.error, {"actual": 0, "ai": 0, "not on the page": 0})
         bucket[locus.matched if locus and locus.matched else "not on the page"] += 1
 
+    # THE VERDICT ON THE DIARIZER, and the single number the correction pass exists to
+    # produce. Every other count here describes how well the pass ran; this one describes
+    # how well the DIARIZER ran, and it comes straight off the annotator's own Add Turn?
+    # column. A row flagged TRUE is one the annotator is saying the diarizer did not merely
+    # mistype but structurally missed: a whole utterance it never heard, or one it welded
+    # into the wrong speaker's turn.
+    structural = sum(1 for correction in corrections if correction.add_turn)
+
     report = {
         "corrections_read": len(corrections),
+        "rows_changing_turn_structure": structural,
+        "rows_changing_words_only": len(corrections) - structural,
         "words_found_on_the_page": found,
         "by_error": by_error,
         "by_locator": {

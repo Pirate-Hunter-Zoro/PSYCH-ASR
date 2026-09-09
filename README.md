@@ -1044,6 +1044,15 @@ number alone — chiefly the 51 rows that have no snippet to match — and one b
 The edits: 35 replacements, 53 inserted turns, 21 extractions, 5 relabels. **89 turns
 became 215** and 7,298 words became 7,388. Speech occupies 48:59 of the 50:39 span.
 
+**The one number in the report that is about the diarizer rather than about the pass:
+`rows_changing_turn_structure` — 75 of the 117.** Every other count says how well the
+correction pass ran. That one is read straight off the annotator's `Add Turn?` column, and it
+says how well the *diarizer* ran: 75 rows assert that the machine did not merely mistype but
+structurally missed something — 47 utterances it never heard at all, 27 it welded into the
+wrong speaker's turn, one it invented. The remaining 42 are words only. Two thirds of a
+50-minute listening pass is therefore a verdict on speaker attribution, which is what makes
+this sheet the reference for the arm comparison rather than only a WER input.
+
 **The role mapping is read off the sheet, not guessed.** Every attribution row's AI column
 names the role the *diarizer* assigned those words to, written down by someone who was
 looking at it, and the host turn's machine label is right there — so the mapping is stated,
