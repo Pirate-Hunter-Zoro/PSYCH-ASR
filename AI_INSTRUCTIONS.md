@@ -28,7 +28,9 @@ identifiable therapy-session recordings, and the participant code is in the file
 
 Concretely, refuse to open any of these, wherever they live and however they are named:
 
-- anything under `data/` — `data/inbox/`, `data/stage1/`, and any tree added later
+- anything under `data/` — `data/inbox/`, `data/stage1/`, `data/stage2/`, and any tree
+  added later. The QC error-log export in `data/stage1/` is included: two of its columns
+  are verbatim speech.
 - `.wav`, `.m4a`, `.mp3`, `.flac`, `.mp4`, `.mov` — the recordings themselves
 - `.rttm`, `.aligned.json`, `.diarized.json`, `.transcript.txt`, `.arm_comparison.json`
 - and do not run `psych_asr.cli.compare_arms`, which prints verbatim disputed transcript
@@ -49,6 +51,16 @@ look. Laundering the read through a tool does not change what it is.
 - **Every line of source in this repository**, and running any pipeline stage over its own
   inputs. A stage writes to disk rather than to you, which is the whole reason the fence
   can be this tight without stopping the work.
+- **A count you compute instead of a file you open.** This is the move that makes the fence
+  survivable, and it is worth naming. When you need to know the *shape* of something inside
+  `data/` — how many rows a spreadsheet has, which of its columns are ever empty, whether a
+  snippet occurs once or forty times, whether two files agree — do not open it. Write the
+  question into a module in `psych_asr/` and run it, and have it print counts, tallies, row
+  numbers, lengths and booleans. The program reads the session; you read the arithmetic.
+  Every design decision in `psych_asr/transcript/corrections.py` was made this way, and the
+  Stage 2 correction report exists so that the audit stays available to whoever comes next.
+  Throw the throwaway probes away when you are done; the ones worth keeping become a
+  `--dry-run` on a real entry point.
 
 ### The exception: a model whose inference runs on this hardware
 

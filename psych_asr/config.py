@@ -58,6 +58,11 @@ NLTK_DATA = MODELS_ROOT / "nltk_data"
 # Session content, and therefore PHI. data/ is gitignored wholesale; nothing here may be
 # written anywhere else.
 STAGE1_DIR = Path("data/stage1")
+# Stage 2's own directory, and deliberately not a subdirectory of Stage 1's: the
+# arm-discovery globs in artifacts/naming.py match "<stem>.*" inside STAGE1_DIR, so a
+# corrected reference stored there would be enrolled as a fifth diarization arm by the
+# bake-off it exists to judge.
+STAGE2_DIR = Path("data/stage2")
 INBOX_DIR = Path("data/inbox")
 
 # ---- Arm names, which are carried in every filename from Stage 1b onward ----

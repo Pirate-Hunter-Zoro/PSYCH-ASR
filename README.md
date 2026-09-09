@@ -923,7 +923,171 @@ is not.
 
 ## Stage 2 — QC, role assignment, and error metrics
 
+### The corrected reference — applying the QC error log
+
+**This exists now and it is the first Stage 2 artifact.** A human listened to session 1
+against the baseline arm's readable transcript and logged one spreadsheet row per error.
+`psych_asr.cli.apply_corrections` reads that sheet and rebuilds the transcript from it:
+
+```bash
+python -m psych_asr.cli.apply_corrections            # writes into data/stage2/
+python -m psych_asr.cli.apply_corrections --dry-run  # the same report, writes nothing
+```
+
+CPU only, sub-second, no models — it runs on the login node and needs no Slurm job. It
+reads the baseline `<stem>.<arm>.diarized.json`, the `<stem>.<arm>.transcript.txt` beside
+it, and the one `*Error Log*.csv` in `data/stage1/`. It writes three files to
+**`data/stage2/`**, and that directory is a separate one on purpose: the arm-discovery
+globs in `artifacts/naming.py` match `<stem>.*` inside `data/stage1/`, so a corrected
+reference stored there would enrol itself as a fifth arm in the bake-off it exists to
+judge.
+
+| Artifact | Contents |
+| --- | --- |
+| `<stem>.corrected.transcript.txt` | the reference, in the same play-script format as every arm transcript (PHI) |
+| `<stem>.corrected.turns.json` | one record per corrected turn: speaker, span, text, and the provenance of both (PHI) |
+| `<stem>.correction_report.json` | counts, locator tallies and spreadsheet row numbers — **no transcript text** |
+
+The report is deliberately the numbers-only sibling that *Getting a reference when the
+assistant cannot read the session* above says every content-carrying artifact needs. It is
+how anyone — including an assistant fenced out of the session — judges whether the pass ran
+well, and it is printed to stdout as well as written, so a job log carries it too.
+
+#### What the six error labels become
+
+Four edits, and the sixth column of the sheet decides between them. `Add Turn?` is the
+load-bearing one, because it is what separates *the words were wrong* from *the turn
+structure was wrong*:
+
+| Edit | Fired by |
+| --- | --- |
+| **replace** the words in a span | Substitution, Proper Noun, Punctuation, Insertion, and the Omissions logged with their surrounding phrase |
+| **insert** a new turn at a point | Omission where the machine transcribed nothing and `Add Turn?` is TRUE |
+| **extract** a span into a turn of its own, splitting its host | Speaker Attribution with `Add Turn?` TRUE |
+| **relabel** the whole host turn | Speaker Attribution with `Add Turn?` FALSE |
+
+The first version of this pass was a `str.replace` loop over the sheet, and all three of
+its failures were silent. It ignored the `Line` column, so a missing two-word backchannel
+replaced *every* occurrence in fifty minutes of speech. It could not represent the 51 rows
+that say the machine wrote nothing — there is no snippet to replace, only a place where a
+turn belongs. And it could not represent the 32 speaker-attribution rows even in
+principle: those do not change the words, they change who said them, which means cutting
+one turn into three, and a string replacement has no concept of a turn.
+
+#### Five things the sheet does that a careful reader would get wrong
+
+Each of these was found by a run that looked like it had succeeded.
+
+1. **`None` is a value, not a blank.** The AI Transcript column says the literal word
+   "None" on the 50 rows where the machine transcribed nothing — and "None" is in pandas'
+   default NA list. Read with `pandas.read_csv`, "the annotator recorded that nothing was
+   transcribed" and "the annotator left the cell empty" become the same `NaN`, and
+   afterwards nothing can tell a pure omission from an unfilled row. The reader is
+   `csv`-based and decides what counts as blank in one visible place.
+2. **The table does not end at the first blank Session ID.** 116 padding rows of bare
+   commas sit below the data, and ending the read there looked right. But the sheet has one
+   *interior* row where the annotator filled in a severity judgement and nothing else — no
+   Session ID, no Error. Stopping at it read **59 of 117 rows** and printed a clean,
+   complete-looking report on half the log. The table now ends where every meaningful cell
+   is blank, a row with content but no Error is reported as incomplete rather than skipped,
+   and a blank Session ID mid-table is treated as the fill-down the export dropped.
+3. **Both text columns end in a speaker role on an attribution row.** The convention is
+   `<utterance> <Role>` — the machine's answer in the AI column, the true answer in the
+   Actual column — so the two cells differ in that last word and agree on every word before
+   it. Matched raw, **none** of the 32 attribution rows appears anywhere in the transcript,
+   because no line of dialogue ends in the word *Therapist*; the longest run of each snippet
+   that does appear is every token but the last. Split the role off and 25 of the 32 are
+   found verbatim and can be *moved* rather than copied. The AI column's role is worth more
+   than a tidier match — see the role assignment below.
+4. **Never search the annotator's column for an omission.** For five of the six error
+   types the text that is on the page is the *machine's*; the annotator's words are, by
+   definition of an omission or a substitution, what the machine did not write. Searching
+   for them anyway matched a missing "mm hmm" against one of the hundred elsewhere in the
+   session, and 34 rows reported a coincidence as evidence. Only a speaker-attribution row
+   is searched the other way round, because there the machine heard the words correctly and
+   only filed them under the wrong person.
+5. **A misattribution is logged twice.** Once as the attribution row that moves the words
+   to the right speaker, and once as an insertion row that takes them out of where they
+   were — and moving them *is* taking them out. Applying both deletes the words twice. The
+   earlier row in sheet order wins and the later is reported as *already accounted for*,
+   which is neither an application nor a failure. Conversely, two attribution rows about two
+   separate `yeah`s inside one turn are two utterances, and the machine only ever
+   transcribed one of them: the second must not collide with the first, and must not go
+   hunting for the same word in a neighbouring turn either. It falls through to its line
+   number and is inserted.
+
+#### The guard that makes the line numbers safe
+
+The `Line` column counts lines in a **rendered** `.txt`, and this pass edits the turn
+structure underneath that render. So it re-renders the JSON and refuses to run unless the
+result reproduces the file on disk. A difference confined to the summary block is reported
+and tolerated — it is a fixed number of lines whatever it says inside them, so it shifts
+nothing — but a difference in the dialogue, or a different total line count, is fatal. If
+the two have drifted, line 348 no longer names the sentence the annotator meant, and every
+correction placed by line number would land on the wrong sentence while looking perfectly
+successful.
+
+`render.py` grew `render_with_line_index`, which returns the same text plus one entry per
+line saying what that line refers to: which turn, and which characters of that turn's text.
+Nothing else can translate between the annotator's coordinate system and the pipeline's.
+
+#### Session 1, applied
+
+117 corrections read, plus one incomplete row named in the report and 115 padding rows
+ignored. **114 applied**, one already accounted for by an earlier row, and **two the pass
+refused to place** — the machine's words at those line numbers could not be found, so
+nothing was replaced, and the report names the rows so the sheet can be fixed rather than
+the transcript guessed at. 57 rows were placed by line *and* snippet agreeing, 58 by line
+number alone — chiefly the 51 rows that have no snippet to match — and one by timestamp.
+
+The edits: 35 replacements, 53 inserted turns, 21 extractions, 5 relabels. **89 turns
+became 215** and 7,298 words became 7,388. Speech occupies 48:59 of the 50:39 span.
+
+**The role mapping is read off the sheet, not guessed.** Every attribution row's AI column
+names the role the *diarizer* assigned those words to, written down by someone who was
+looking at it, and the host turn's machine label is right there — so the mapping is stated,
+not inferred. Rows that correct words inside a turn without creating a boundary vote too, as
+the annotator accepting the diarizer's speaker at that point. `SPEAKER_00` → therapist by
+**49 votes to 3**, `SPEAKER_01` → participant by 16 to 0.
+
+One category of row must *not* vote, and it is the subtle one: a row with `Add Turn?` TRUE
+and no role of its own. Those are utterances the machine missed entirely, so the turn they
+are inserted into is usually the *other* person's, and the host label and the logged role
+are deliberately different. Counting them as agreement took the `SPEAKER_00` vote from
+decisive to 20–17.
+
+**And the mapping inverts the talk-time heuristic exactly as this README predicted it
+would.** In the corrected reference the *therapist* holds **78.6%** of the talk time across
+108 turns, against the participant's 21.4% across 107. Session 1 is the didactic intro. An
+independent lexical check agrees with the vote and not with talk time: the therapist-mapped
+cluster asks 3.4× as many questions per sentence and uses *you/your* 1.7× as often as
+*I/my*, while the participant-mapped cluster uses *I/my* 3.3× as often as *you* and has a
+median turn of 5 words against 43.
+
+#### What this artifact is not
+
+**It does not carry word timings, and it must not be scored as though it did.** A corrected
+turn's span is the host turn's own, split proportionally to character offset where a turn was
+cut in two; an inserted turn has zero duration, because how long a backchannel lasted is not
+in the spreadsheet. Every turn records which of those it is in a `time_source` field, and the
+annotator's own observed time is kept beside the span as `logged_at` rather than being written
+into it — an earlier version did write it into `start`, which put turns out of order and made
+the talk-time table sum to 107% of the session.
+
+So this is the corrected **words and turn sequence**, and it is already the reference for
+comparing the arms on attribution and turn structure. It is *not* yet a reference RTTM.
+Getting one means re-aligning the corrected words to the waveform, which is a Stage 1a job
+over Stage 2 text and is the next thing after the arm comparison — not something to fake
+here by spreading interpolated spans out until they look like measurements.
+
 ### Proposing therapist vs patient
+
+**For any session with an error log, the question above is already answered** — the log
+states the diarizer's own attribution on every speaker-attribution row, and
+`apply_corrections` reads the mapping straight off it with its vote counts as evidence. What
+follows is for the sessions that have no log, which is the point: the pilot has to measure
+whether the mapping can be proposed *without* one.
+
 
 Diarization labels are anonymous by construction, so every session needs
 `SPEAKER_00`/`SPEAKER_01` mapped onto therapist and patient. Doing this by hand for the
@@ -1278,11 +1442,13 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 │   ├── artifacts/             # on-disk shapes. STDLIB ONLY — all four envs import these
 │   │   ├── rttm_io.py             # RTTM read/write + turn-table diagnostics
 │   │   ├── naming.py              # <stem>.<arm>.<kind>, parsed and built in one place
+│   │   ├── error_log.py           # Stage 2: the QC spreadsheet export, parsed
 │   │   └── transcripts.py         # load/save, relink_word_segments, tolerant readers
 │   ├── transcript/            # turn grouping, the talk-time table, the readable render
 │   │   ├── turns.py               # collapse consecutive same-speaker segments
 │   │   ├── summary.py             # talk-time shares + the header every job prints
-│   │   └── render.py              # .diarized.json -> the play-script .txt
+│   │   ├── corrections.py         # Stage 2: the error log -> a corrected turn list
+│   │   └── render.py              # .diarized.json -> the play-script .txt (+ line index)
 │   ├── asr/align.py           # Stage 1a: Whisper decode + wav2vec2 forced alignment
 │   ├── diarize/               # Stage 1b, one module per arm + the shared stitcher
 │   │   ├── pyannote_arm.py        # baseline; keeps the exclusive (overlap-free) view
@@ -1299,7 +1465,8 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 │       ├── run_whisperx.py        ├── render_transcript.py├── gpu_smoke.py
 │       ├── diarize_pyannote.py    ├── compare_arms.py     ├── warm_align_cache.py
 │       ├── diarize_diarizen.py    ├── check_split_regression.py
-│       └── diarize_sortformer.py  └── audit_speakers.py   (stub — see Stage 2)
+│       ├── diarize_sortformer.py  ├── audit_speakers.py   (stub — see Stage 2)
+│       └── apply_corrections.py   # Stage 2: the error log -> the corrected reference
 ├── scripts/               # shell only; everything Python lives in the package
 │   ├── setup_envs.sh          # builds all four conda prefix envs, each smoke-checked
 │   ├── standardize.sh         # Stage 0: one recording in -> 16 kHz mono WAV beside it
@@ -1320,7 +1487,9 @@ default and once at a shorter `chunk_size`, and score both against the same turn
 ├── tests/                 # pytest over SYNTHETIC transcripts and turn tables — no PHI
 └── data/                  # raw + derived data — GITIGNORED (PHI)
     ├── inbox/                 # exactly one .wav — the file Stage 1 will process
-    └── stage1/                # Stage 1 output, one set per arm (see the artifact table above)
+    ├── stage1/                # Stage 1 output, one set per arm (see the artifact table above)
+    │                          #   + the QC error log export the annotator produced
+    └── stage2/                # the corrected reference + its numbers-only report
 ```
 
 ### Package layout — the two rules that shape it
@@ -1366,8 +1535,11 @@ and it runs without the cluster. Run it from the repo root:
 python -m pytest tests -q
 ```
 
-64 tests in `asr_env`; the four that need `whisperx` skip themselves elsewhere, so the same
+90 tests in `asr_env`; the four that need `whisperx` skip themselves elsewhere, so the same
 suite runs in torch-free `diar_eval_env` and covers the scorer's pure logic there.
+`test_corrections.py` is the largest single file in it, and every case in it is one of the
+silent failures in *Five things the sheet does that a careful reader would get wrong* above,
+written down so it cannot come back.
 
 What it deliberately does **not** cover is anything that needs a model. Whisper's decode,
 pyannote's clustering, DiariZen's VBx and Sortformer's forward pass are exercised only by
@@ -1401,14 +1573,17 @@ top of this README); the former `writeup/` directory was relocated there.
   search query is an exfiltration event under this constraint, not a bug.
 - **The rule is written down, and separately it is enforced.** `AI_INSTRUCTIONS.md` opens
   with **The data fence**, which binds any assistant working here whether or not anything
-  stops it. Underneath that, a `PreToolUse` guard (`~/claude-config/hooks/block-phi.py`)
+  stops it. Underneath that, a `PreToolUse` guard (`~/.claude/hooks/block-phi.py`)
   refuses every read of the raw audio, the diarization and ASR output shapes, anything under
-  `data/`, and any invocation of `psych_asr.cli.compare_arms` — which prints disputed
+  `data/` (`stage2/` included, by the same directory rule that covers `stage1/`), and any
+  invocation of `psych_asr.cli.compare_arms` — which prints disputed
   transcript spans to stdout, so running it counts as a read. Left open on purpose, because
   refusing more would make the assistant useless on the bake-off: `*.arm_scores.json`
   (metrics, no text), `slurm_jobs/logs/**` (counts and durations), every pipeline entry
   point and every job that runs one, and `ls`/`find`/`stat` against the artifacts.
-  Filenames and sizes are not content.
+  Filenames and sizes are not content. The Stage 2 correction report is written to stdout
+  as well as to `data/stage2/`, for the same reason: the numbers about a session are not the
+  session, and a pass nobody can audit is a pass nobody should trust.
 - **The fence turns on where inference runs, not on which model it is.** A hosted assistant
   reading a transcript has transmitted a therapy session to a third party. A model whose
   weights execute on LIBR compute, with no tool-calling surface, is inside the fence, and

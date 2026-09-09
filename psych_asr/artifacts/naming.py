@@ -16,6 +16,16 @@ which is why adding a fifth arm needs no change to the join.
     <stem>.arm_comparison.json          the word-level diff between arms (PHI: carries text)
     <stem>.arm_scores.json              DER and the therapy measures (numbers only)
 
+Stage 2 adds three more, written to data/stage2/ rather than beside the Stage 1 artifacts.
+THAT SEPARATION IS DELIBERATE: the discovery helpers at the bottom of this module glob
+"<stem>.*" to find the arms, and a corrected reference sitting in that directory would
+enrol itself as a fifth arm in the bake-off it exists to judge.
+
+    <stem>.corrected.transcript.txt     Stage 2, the hand-corrected reference (PHI)
+    <stem>.corrected.turns.json         Stage 2, the same as a turn table (PHI)
+    <stem>.correction_report.json       Stage 2, what the pass did (numbers and
+                                        spreadsheet row numbers only, no text)
+
 Four scripts each used to re-derive these suffixes with their own slicing, and they
 disagreed about edge cases -- one inferred an arm by splitting on ".", which turns the arm
 "community-1" into "community-1" only by luck and would have broken on any arm name with a
@@ -31,6 +41,9 @@ RTTM_SUFFIX = ".rttm"
 EXCLUSIVE_RTTM_SUFFIX = ".exclusive.rttm"
 COMPARISON_SUFFIX = ".arm_comparison.json"
 SCORES_SUFFIX = ".arm_scores.json"
+CORRECTED_TRANSCRIPT_SUFFIX = ".corrected.transcript.txt"
+CORRECTED_TURNS_SUFFIX = ".corrected.turns.json"
+CORRECTION_REPORT_SUFFIX = ".correction_report.json"
 
 
 def _strip_suffix(name, suffix):
@@ -155,3 +168,31 @@ def find_arm_transcripts(stage1_dir, stem):
         (arm_from(path, stem, DIARIZED_SUFFIX), path)
         for path in sorted(Path(stage1_dir).glob(f"{stem}.*{DIARIZED_SUFFIX}"))
     ]
+
+
+def corrected_transcript_path(directory, stem):
+    """IN: the Stage 2 directory + stem   OUT: Path to <stem>.corrected.transcript.txt.
+
+    THE HAND-CORRECTED REFERENCE, and therefore PHI twice over: it carries session content,
+    and it is the most accurate copy of that content that exists.
+    """
+    return Path(directory) / f"{stem}{CORRECTED_TRANSCRIPT_SUFFIX}"
+
+
+def corrected_turns_path(directory, stem):
+    """IN: the Stage 2 directory + stem   OUT: Path to <stem>.corrected.turns.json.
+
+    The machine-readable form of the same thing: one record per corrected turn, carrying
+    the provenance of its words and of its timing. PHI (carries text).
+    """
+    return Path(directory) / f"{stem}{CORRECTED_TURNS_SUFFIX}"
+
+
+def correction_report_path(directory, stem):
+    """IN: the Stage 2 directory + stem   OUT: Path to <stem>.correction_report.json.
+
+    Counts, locator tallies and spreadsheet row numbers. NO transcript text, by
+    construction -- it is what lets someone who may not read the session judge how well
+    the correction pass ran.
+    """
+    return Path(directory) / f"{stem}{CORRECTION_REPORT_SUFFIX}"
