@@ -41,12 +41,57 @@ support a grant application (R21, possibly R01) for processing the full set of s
 > directory, is the sequel — *Did the Computer Hear It Right?* — and it is written in
 > deliberately plain language: nothing is named before it is used, and the three Stage 1
 > models are "the typist", "the stopwatch" and "the name-tagger" throughout. Rewritten
-> 2026-09-09 to 22 slides: the pipeline with **all three** boxes marked swappable rather than
-> one; what a human annotator recorded in her 117-row error log, and the single column
-> (`Add Turn?`) that splits it 75/42 into *the turns were wrong* versus *the words were
-> wrong*; **the correction algorithm as six worked examples**, each showing the literal
-> spreadsheet row, the turns before and the turns after; and the model grid now planned.
-> Counts only, no session content.
+> 2026-09-09 to 22 slides, and to 25 on 2026-09-10: the pipeline with **all three** boxes
+> marked swappable rather than one; what a human annotator recorded in her 117-row error
+> log, how often each of the six error labels occurs (a bar chart — 69 Omission, 32 Speaker
+> Attribution, 9 Insertion, 5 Substitution, 1 Proper Noun, 1 Punctuation), the **three
+> shapes** every row takes on invented two-line exchanges (*turn added*, *turn moved*,
+> *words only*), and the single column (`Add Turn?`) that splits the same 117 rows 75/42
+> into *the turns were wrong* versus *the words were wrong*; **the correction algorithm as
+> six worked examples**, each showing the literal spreadsheet row, the turns before and the
+> turns after; and the model grid now planned. Counts only, no session content.
+>
+> **The shapes are taught before they are counted, and that order is deliberate.** The
+> *turn added* / *turn moved* / *words only* slide comes immediately **before** the
+> `Add Turn?` table, because the table's rows cannot be read until "add or move a turn"
+> means something concrete. Its first two examples share an identical right-hand column on
+> purpose: what was really said is the same, and only the machine's version differs, which
+> is the entire difference between adding a turn and moving one. Its invented lines are
+> also length-tuned so the welded turn stays on **one** line — wrapped, it reads as two
+> turns and teaches the opposite of the intended point.
+>
+> **The deck now states the `Line` column's resolution limit, which is a property of the
+> reference itself.** `Line` names one *wrapped* line of the rendered transcript
+> (`render.py`, `WRAP_WIDTH = 96`), not a whole turn, and `line_lookup` resolves it to that
+> line's character span inside its turn. For a **pure omission** — `is_pure_omission`, i.e.
+> `AI Transcript` is `None` — there is no snippet to search for, so the words are placed at
+> the **end of the logged line's words**. Of the 117 rows, **58 are placed by line number
+> alone** and 57 by line-plus-snippet. The cost: if the missing words belonged mid-line
+> they land at the line's end — right turn, right speaker, right words, wrong position.
+> That leaves every turn-level metric untouched, which is why it was acceptable, and it is
+> now the fourth row of the "It cannot grade" table plus its own worked slide on invented
+> lines. Do not let an edit quietly re-imply that `Line` points at a turn.
+>
+> **Example 2 is the one example drawn in the file's own numbered layout**, gutter and all,
+> with a caret on the exact insertion point — the other five compress a turn to a single
+> line, which is what made the anchor invisible. Its box also says in as many words that
+> the position inside the line is *assumed*. The annotator never edited the transcript:
+> the line numbers are the machine's, and `apply_corrections` re-renders the baseline and
+> refuses to trust the `Line` column unless the text reproduces byte for byte.
+>
+> **Both omission conventions exist in the pilot sheet, and the code handles both.** 52 of
+> the 69 Omission rows log `None` and are placed by line; 17 log the surrounding phrase and
+> are located by finding the machine's own words, which is the more precise row. The
+> `search_texts` docstring is the authority on why the annotator's column is *not* searched
+> for the other five error types.
+>
+> **The two breakdowns are cut on different axes, and the deck says so.** The bar chart
+> counts every row once under its `Error` label; the 75/42 table counts every row once
+> under `Add Turn?`. They are not nested — the 27 misattributions that move a turn are the
+> ticked *subset* of the 32 Speaker Attribution rows, the other 5 being pure relabels, and
+> the 42 "words only" row draws on all six labels (22 Omission, 8 Insertion, 5 Speaker
+> Attribution, 5 Substitution, 1 Proper Noun, 1 Punctuation) rather than being a seventh
+> category of its own.
 >
 > **Two things about its form are deliberate and should survive edits.** It is written in the
 > present tense and never narrates what the project used to believe. And the algorithm is
