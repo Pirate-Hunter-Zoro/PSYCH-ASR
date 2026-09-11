@@ -25,6 +25,18 @@ enrol itself as a fifth arm in the bake-off it exists to judge.
     <stem>.corrected.turns.json         Stage 2, the same as a turn table (PHI)
     <stem>.correction_report.json       Stage 2, what the pass did (numbers and
                                         spreadsheet row numbers only, no text)
+    <stem>.<arm>.error_profile.json     Stage 2, that arm graded against the reference the
+                                        annotator's way (counts and label names only)
+    <stem>.error_profiles.json          Stage 2, every graded arm in one table (same)
+    <stem>.<arm>.error_detail.json      Stage 2, the spans behind those counts. PHI: it
+                                        quotes both transcripts.
+
+THE ARM NAME IS WHAT MAKES THE MODEL GRID FREE. A grid cell is a typist, a stopwatch and a
+name-tagger, and nothing in this module needs to know that: the arm is whatever string
+sits between the stem and the suffix, so "large-v3+wav2vec2-base+community-1" is a
+perfectly good arm name and the discovery helpers, the join and the grader already handle
+it. That is only true because the parsing below is by exact suffix rather than by
+splitting on ".".
 
 Four scripts each used to re-derive these suffixes with their own slicing, and they
 disagreed about edge cases -- one inferred an arm by splitting on ".", which turns the arm
@@ -44,6 +56,9 @@ SCORES_SUFFIX = ".arm_scores.json"
 CORRECTED_TRANSCRIPT_SUFFIX = ".corrected.transcript.txt"
 CORRECTED_TURNS_SUFFIX = ".corrected.turns.json"
 CORRECTION_REPORT_SUFFIX = ".correction_report.json"
+ERROR_PROFILE_SUFFIX = ".error_profile.json"
+ERROR_PROFILES_SUFFIX = ".error_profiles.json"
+ERROR_DETAIL_SUFFIX = ".error_detail.json"
 
 
 def _strip_suffix(name, suffix):
@@ -196,3 +211,34 @@ def correction_report_path(directory, stem):
     the correction pass ran.
     """
     return Path(directory) / f"{stem}{CORRECTION_REPORT_SUFFIX}"
+
+
+def error_profile_path(directory, stem, arm):
+    """IN: the Stage 2 directory + stem + arm   OUT: Path to <stem>.<arm>.error_profile.json.
+
+    One arm graded against the corrected reference, in the annotator's own categories.
+    Counts, rates and label names -- NO transcript text, by construction, which is what
+    lets a whole grid of these be read and charted by somebody who may not read the session.
+    """
+    return Path(directory) / f"{stem}.{arm}{ERROR_PROFILE_SUFFIX}"
+
+
+def error_profiles_path(directory, stem):
+    """IN: the Stage 2 directory + stem   OUT: Path to <stem>.error_profiles.json.
+
+    Every graded arm in one file, which is what a grid figure is drawn from. Same
+    numbers-only guarantee as the per-arm profile.
+    """
+    return Path(directory) / f"{stem}{ERROR_PROFILES_SUFFIX}"
+
+
+def error_detail_path(directory, stem, arm):
+    """IN: the Stage 2 directory + stem + arm   OUT: Path to <stem>.<arm>.error_detail.json.
+
+    The spans behind the counts: for each classified difference, what the reference says and
+    what the arm said. PHI TWICE OVER -- it quotes the arm's transcript AND the most
+    accurate copy of the session that exists. Written only when asked for: the counts are
+    what the bake-off is decided on, and this is what somebody inside the fence reads once
+    to confirm the counts mean what they claim.
+    """
+    return Path(directory) / f"{stem}.{arm}{ERROR_DETAIL_SUFFIX}"

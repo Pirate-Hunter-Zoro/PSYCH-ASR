@@ -32,7 +32,10 @@ Concretely, refuse to open any of these, wherever they live and however they are
   added later. The QC error-log export in `data/stage1/` is included: two of its columns
   are verbatim speech.
 - `.wav`, `.m4a`, `.mp3`, `.flac`, `.mp4`, `.mov` — the recordings themselves
-- `.rttm`, `.aligned.json`, `.diarized.json`, `.transcript.txt`, `.arm_comparison.json`
+- `.rttm`, `.aligned.json`, `.diarized.json`, `.transcript.txt`, `.arm_comparison.json`,
+  `.error_detail.json` — the last being the span-by-span output of the grading pass, which
+  quotes the reference and the arm side by side and is therefore the most concentrated
+  transcript text in the tree. It is written only when `grade_arms --details` asks for it.
 - and do not run `psych_asr.cli.compare_arms`, which prints verbatim disputed transcript
   spans to stdout. Running it is a read.
 
@@ -48,6 +51,10 @@ look. Laundering the read through a tool does not change what it is.
   content.
 - **`*.arm_scores.json`.** DER and the therapy measures. Metrics, no transcript text. It
   sits inside `data/` and is readable on purpose.
+- **`*.correction_report.json`, `*.error_profile.json`, `*.error_profiles.json`.** What the
+  correction pass did, and what the grading pass found: counts, rates, label names and
+  spreadsheet row numbers. No transcript text by construction, which is the whole reason
+  the grid can be charted from outside the fence. Also readable on purpose.
 - **Every line of source in this repository**, and running any pipeline stage over its own
   inputs. A stage writes to disk rather than to you, which is the whole reason the fence
   can be this tight without stopping the work.
